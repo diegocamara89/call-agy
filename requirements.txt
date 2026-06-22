@@ -1,0 +1,5 @@
+# call-agy — dependencias
+# Unica dependencia real: pywinpty cria o ConPTY (pseudo-terminal Windows) que engana o agy
+# e faz ele emitir saida fora de um TTY interativo (contorna o bug #76).
+# Testado e confirmado: Python 3.12.9 + pywinpty 3.0.5 em Windows 11.
+pywinpty>=3.0.5
