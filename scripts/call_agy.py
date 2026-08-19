@@ -10,8 +10,13 @@ Preserva a interface ORIGINAL do usuario (ordem antiga dos kwargs e modo permiss
         python call_agy.py "seu prompt aqui" --timeout 180
         python call_agy.py "seu prompt aqui" --model "Claude Opus 4.6 (Thinking)"
 
-A logica real (ConPTY, strip CR-aware, paralelo, pipeline, fanout) vive em `agy.py`, no mesmo
+A logica real (transporte JSON, paralelo, pipeline, fanout, handoff) vive em `agy.py`, no mesmo
 diretorio. Este arquivo so reexporta para nao duplicar codigo. Codigo NOVO deve importar de `agy.py`.
+
+NOTA (2026-08-15): o transporte deixou de ser ConPTY e passou a ser subprocess +
+`--output-format json`. Chamadas legadas por aqui continuam funcionando e ficaram ~2x mais
+rapidas, mas perdem os campos novos do envelope (conversation_id, usage, structured) — quem
+precisa deles deve migrar para `agy.call_agy_result`.
 
 DIFERENCA DE ORDEM DE KWARGS (importante):
     shim (aqui):   call_agy(prompt, timeout=180, model=None)     # historico do usuario
@@ -51,7 +56,7 @@ def call_agy(prompt: str, timeout: int = 180, model: str | None = None) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Chama agy (Antigravity CLI) via ConPTY e imprime a resposta (interface antiga)."
+        description="Chama agy (Antigravity CLI) e imprime a resposta (interface antiga)."
     )
     parser.add_argument("prompt", help="Prompt a enviar ao agy")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Timeout em segundos")
