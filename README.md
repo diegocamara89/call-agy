@@ -2,10 +2,10 @@
 
 > 🇧🇷 [Português](#-português) · 🇺🇸 [English](#-english)
 
-Chame o **`agy`** (Antigravity CLI do Google) de forma confiável a partir de código no Windows —
-contornando o bug que faz o `agy -p` retornar **0 bytes** fora de um terminal real — e use os
-modelos do `agy` (incluindo **Claude Opus/Sonnet** servidos pelo Antigravity) como **executores e
-validadores baratos para o Claude Code, economizando tokens da API Anthropic**.
+Camada de transporte para chamar o **`agy`** (Antigravity CLI do Google) a partir de código —
+chamada única, paralelo, pipeline, fan-out/council e handoff estruturado — usando os modelos do
+`agy` (incluindo **Claude Opus/Sonnet** servidos pelo Antigravity) como **executores e validadores
+baratos para o Claude Code, economizando tokens da API Anthropic**.
 
 ---
 
@@ -14,8 +14,8 @@ validadores baratos para o Claude Code, economizando tokens da API Anthropic**.
 ### Por que isto importa (economia de tokens no Claude Code)
 
 O `agy` dá acesso, numa única CLI, a Gemini 3.x, **Claude Opus 4.6 / Sonnet 4.6** e GPT-OSS. Com
-esta camada de transporte, o **Claude Code** consegue **delegar trabalho para esses modelos via
-`agy`** em vez de gastar tokens da API Anthropic:
+esta camada, o **Claude Code** consegue **delegar trabalho para esses modelos via `agy`** em vez de
+gastar tokens da API Anthropic:
 
 - **Executor barato** — fan-out de subtarefas mecânicas (resumir, extrair, classificar, gerar
   rascunhos) para `Gemini Flash`/`Pro` em paralelo, e o Claude Code só revisa o resultado.
@@ -26,25 +26,30 @@ esta camada de transporte, o **Claude Code** consegue **delegar trabalho para es
 
 Resultado: o raciocínio caro fica no Claude Code; o volume vai para o `agy`.
 
-### O problema (bug TTY #76)
+### O transporte
 
-`agy -p "prompt"` retorna `rc=0` e **0 bytes** sempre que o `stdout` **não** é um TTY real:
+Chamamos sempre `agy -p "..." --output-format json`, com **argv como lista** e `shell=False`. Isso
+funciona por pipe, redirect e subprocess comum, e o envelope JSON traz muito mais que o texto:
 
-```bash
-agy -p "..." | cat        # volta vazio
-agy -p "..." > out.txt     # arquivo vazio
-subprocess.run([...])      # vazio
+```json
+{"conversation_id":"74bf...","status":"SUCCESS","response":"4\n","duration_seconds":2.7,
+ "num_turns":1,"usage":{"total_tokens":39656}}
 ```
 
-O `rc=0` é inútil para diagnosticar — resposta válida, bug 0-byte e modelo inválido **todos** dão
-`rc=0`. Bug confirmado: [google-antigravity/antigravity-cli#76](https://github.com/google-antigravity/antigravity-cli/issues/76).
-Até onde sei, **não há solução pública para isto** — este repositório é a primeira.
+Com `--json-schema` vem também `structured_output`, **já parseado** — nada de extrair JSON de prosa
+na marra.
 
-**Solução:** rodar o `agy` dentro de um **ConPTY** (pseudo-terminal do Windows) via
-[`pywinpty`](https://pypi.org/project/pywinpty/). O ConPTY "engana" o `agy` (ele vê um terminal
-real) e a saída volta normalmente; depois limpamos ANSI/CSI/OSC e descartamos o spinner (CR-aware).
+> **Sobre o bug TTY #76.** Versões antigas do `agy` retornavam `rc=0` e **0 bytes** quando o stdout
+> não era um TTY real, e a solução era um ConPTY via [`pywinpty`](https://pypi.org/project/pywinpty/).
+> **Verificado em 2026-08-15 no agy 1.1.13: o print mode foi corrigido** — pipe, redirect e
+> subprocess funcionam. O ConPTY continua disponível em `transport="pty"` para quem roda versão
+> antiga, mas não é mais o caminho padrão e `pywinpty` deixou de ser obrigatório.
+>
+> **O bug persiste no subcomando `agy models`**, que ainda trava com 0 bytes fora de TTY. Nunca o
+> chame de um script — use `known_models(refresh=True)`, que arranca a lista oficial do próprio
+> `agy` em ~3,4s e **zero tokens**.
 
-### Quatro superfícies
+### Superfícies
 
 | Função | O que faz |
 |---|---|
@@ -52,17 +57,18 @@ real) e a saída volta normalmente; depois limpamos ANSI/CSI/OSC e descartamos o
 | `call_agy_parallel` | N jobs concorrentes (cap + retry/backoff, ordem preservada) |
 | `pipeline` | encadeamento (a saída de A vira a entrada de B) |
 | `fanout_synthesize` | fan-out de N modelos → síntese (base de um *council*) |
+| `call_agy_handoff` | executa e devolve o handoff JSON do contrato `orchestrate` |
+| `extract_json` | parser balanceado de 3 níveis, para quando não dá para impor schema |
 
 ### Requisitos
 
-- **Windows** (a solução depende do ConPTY) · **Python 3.12+** (testado em 3.12.9)
-- **`pywinpty>=3.0.5`** — única dependência
-- O binário **`agy`** instalado e logado ([antigravity.google/cli](https://antigravity.google/cli)),
+- **Python 3.10+** (testado em 3.12.9) · **sem dependências externas** no caminho padrão
+- O binário **`agy` 1.1.13+** instalado e logado ([antigravity.google/cli](https://antigravity.google/cli)),
   no `PATH` ou em `~/AppData/Local/agy/bin/agy.exe`
+- `pywinpty` **opcional**, só para `transport="pty"` (agy antigo)
 
-```bash
-pip install -r requirements.txt
-```
+Testado no Windows 11. O transporte JSON não depende de nada específico de Windows, mas só o
+Windows foi verificado.
 
 ### Uso rápido
 
@@ -74,85 +80,113 @@ sys.path.insert(0, r"<CAMINHO>\call-agy\scripts")
 from agy import call_agy
 
 resp = call_agy("Quanto é 17*23? Responda só o número.",
-                model="Gemini 3.5 Flash (Low)", timeout=90)
+                model="Gemini 3.7 Flash (Low)", timeout=90)
 print(resp)   # -> 391
 ```
 
 ```python
+# Diagnóstico estruturado: custo, sessão e status por chamada
+from agy import call_agy_result
+r = call_agy_result("Analise X", model="Gemini 3.1 Pro (High)", timeout=300, effort="high")
+r.status, r.usage["total_tokens"], r.conversation_id
+
 # Paralelo (fan-out) — resultados alinhados 1:1 com os jobs, na ordem
 from agy import call_agy_parallel
-jobs = [
+results = call_agy_parallel([
     {"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.1 Pro (Low)"},
-    {"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.5 Flash (Medium)"},
-]
-results = call_agy_parallel(jobs, max_concurrency=4, retries=2, timeout=180)
+    {"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.7 Flash (Medium)"},
+], max_concurrency=4, retries=2, timeout=180)
 
-# Pipeline (encadeamento)
+# Pipeline (encadeamento) — chain_conversation mantém UMA sessão viva no agy
 from agy import pipeline
 res = pipeline([
     {"model": "Gemini 3.1 Pro (Low)", "prompt": "Gere UMA ideia de feature. Conciso."},
     {"model": "Claude Opus 4.6 (Thinking)",
      "builder": lambda prev: f"Critique e aponte 3 riscos:\n\n{prev[-1].text}"},
-])
+], chain_conversation=False)
 print(res["final"])
+
+# Saída estruturada: dict já parseado, sem regex
+r = call_agy_result("Avalie o risco do deploy de sexta.", model="Gemini 3.7 Flash (Low)",
+                    json_schema={"type": "object",
+                                 "properties": {"nivel": {"type": "string"}},
+                                 "required": ["nivel"]})
+print(r.structured["nivel"])
 
 # Fan-out -> síntese (council)
 from agy import fanout_synthesize
 verdict = fanout_synthesize(
     "Devo lançar um curso de $297 ou um workshop de $97 primeiro?",
-    models=["Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (High)", "Claude Opus 4.6 (Thinking)"],
+    models=["Gemini 3.1 Pro (High)", "Gemini 3.7 Flash (High)", "Claude Opus 4.6 (Thinking)"],
     synth_model="Claude Opus 4.6 (Thinking)", max_concurrency=5, seed=42,
 )
 print(verdict.text)
 ```
 
-Mais exemplos (template `{prev}`, `jobs.json`, `steps.json`, retrocompatibilidade) em
-[`examples.md`](examples.md).
+Mais exemplos (template `{prev}`, `conversation_id`, handoff, `jobs.json`, `steps.json`,
+retrocompatibilidade) em [`examples.md`](examples.md).
 
 ### CLI
 
 ```bash
-python scripts/agy.py single   -p "Quanto é 17*23?" --model "Gemini 3.5 Flash (Low)"
+python scripts/agy.py single   -p "Quanto é 17*23?" --model "Gemini 3.7 Flash (Low)"
 python scripts/agy.py parallel --jobs jobs.json --max-concurrency 4 --retries 2
-python scripts/agy.py pipeline --steps steps.json
+python scripts/agy.py pipeline --steps steps.json --chain-conversation
 python scripts/agy.py fanout   -p "Pergunta?" --models "Gemini 3.1 Pro (High);Claude Opus 4.6 (Thinking)"
-python scripts/agy.py models   [--refresh]
+python scripts/agy.py handoff  -p "Rode os testes e reporte"
+python scripts/agy.py models   --refresh
 ```
 
 Exit codes: **0** tudo ok · **1** falha parcial · **2** erro fatal.
 
 ### Modelos (`--model`)
 
-Passe a string **exata**. O `agy` faz **fallback silencioso** para o default em modelo inválido
-(sem erro, `rc=0`), então a validação pré-call é obrigatória por padrão (`validate_model=True`).
+Passe a string **exata**. Modelo inválido **não passa mais em silêncio**: com
+`--output-format json` o `agy` responde `rc=1`, `status:"ERROR"` e lista os IDs válidos no campo
+`error` — em ~4s e sem gastar token. A validação pré-call (`validate_model=True`) continua ligada
+só para economizar esse round-trip.
+
+Catálogo verificado em **2026-08-15** (14 IDs, agy 1.1.13). Prefira sempre a versão mais alta de
+cada família.
 
 | ID literal | Família | Uso sugerido |
 |---|---|---|
-| `Gemini 3.5 Flash (Low/Medium/High)` | Gemini | probes, triagem, análise leve |
+| `Gemini 3.7 Flash (Low/Medium/High)` | Gemini | **linha atual** — probes, triagem, análise leve |
+| `Gemini 3.6 Flash (Low/Medium/High)` | Gemini | legado / diversidade |
+| `Gemini 3.5 Flash (Low/Medium/High)` | Gemini | legado |
 | `Gemini 3.1 Pro (Low/High)` | Gemini | análise pontual / arquitetural |
 | `Claude Sonnet 4.6 (Thinking)` | Claude | raciocínio, review |
-| `Claude Opus 4.6 (Thinking)` | Claude | síntese/chairman (default) |
+| `Claude Opus 4.6 (Thinking)` | Claude | síntese/chairman (`SYNTH_MODEL`) |
 | `GPT-OSS 120B (Medium)` | GPT-OSS | diversidade no council |
 
-Omita `--model` para usar o default de `~/.gemini/antigravity-cli/settings.json`. Os IDs refletem uma
-instalação específica — rode `agy models` para ver os seus.
+Omita `--model` para usar o default de `~/.gemini/antigravity-cli/settings.json` (nesta instalação,
+`Gemini 3.7 Flash (High)`). Os IDs refletem uma instalação específica — rode
+`python scripts/agy.py models --refresh` para ver os seus. O catálogo é volátil: veja **Manutenção
+do catálogo** no `SKILL.md` (revisão a cada 15 dias).
 
 ### Estrutura
 
 ```
 call-agy/
-├── SKILL.md            # spec da skill (bug ConPTY, modelos, como chamar)
+├── SKILL.md            # spec da skill (transporte, modelos, como chamar)
 ├── README.md           # este arquivo
 ├── examples.md         # exemplos copiáveis
-├── requirements.txt    # pywinpty>=3.0.5
+├── requirements.txt    # vazio no caminho padrão; pywinpty só para transport="pty"
 ├── LICENSE             # MIT
 ├── scripts/
-│   ├── agy.py          # fonte da verdade (transporte + paralelo/pipeline/fanout + CLI)
+│   ├── agy.py          # fonte da verdade (transporte + paralelo/pipeline/fanout/handoff + CLI)
 │   └── call_agy.py     # shim de retrocompatibilidade
-└── tests/              # scripts de scratch do ConPTY
+└── tests/
+    ├── test_agy.py           # puros (SKIP_LIVE=1) + vivos
+    └── legacy-pty-probes/    # probes exploratórios do ConPTY
 ```
 
-**Plataforma:** somente Windows.
+### Testes
+
+```bash
+SKIP_LIVE=1 python tests/test_agy.py    # só os puros (offline, instantâneo)
+python tests/test_agy.py                # + os vivos (chamam o agy, alguns minutos)
+```
 
 ---
 
@@ -173,19 +207,24 @@ Anthropic API tokens:
 
 The expensive reasoning stays in Claude Code; the volume goes to `agy`.
 
-### The problem (TTY bug #76)
+### The transport
 
-`agy -p "prompt"` returns `rc=0` and **0 bytes** whenever `stdout` is **not** a real TTY (pipe,
-redirect, plain subprocess). The `rc=0` is useless for diagnosis — a valid answer, the 0-byte bug,
-and an invalid model **all** return `rc=0`. Confirmed:
-[google-antigravity/antigravity-cli#76](https://github.com/google-antigravity/antigravity-cli/issues/76).
-As far as I know there is **no public fix for this** — this repo is the first.
+We always call `agy -p "..." --output-format json`, with **argv as a list** and `shell=False`. That
+works over pipes, redirects and plain subprocesses, and the JSON envelope carries far more than the
+text: `conversation_id`, `status`, `error`, `duration_seconds`, `num_turns`, `usage`, plus
+`structured_output` (**already parsed**) when you pass `--json-schema`.
 
-**Fix:** run `agy` inside a **ConPTY** (Windows pseudo-terminal) via
-[`pywinpty`](https://pypi.org/project/pywinpty/). The ConPTY tricks `agy` into seeing a real
-terminal, so output flows normally; we then strip ANSI/CSI/OSC and drop spinner frames (CR-aware).
+> **About TTY bug #76.** Older `agy` builds returned `rc=0` and **0 bytes** whenever stdout was not
+> a real TTY, and the fix was a ConPTY via [`pywinpty`](https://pypi.org/project/pywinpty/).
+> **Verified 2026-08-15 on agy 1.1.13: print mode is fixed** — pipe, redirect and subprocess all
+> work. ConPTY remains available as `transport="pty"` for old builds, but it is no longer the
+> default and `pywinpty` is no longer required.
+>
+> **The bug does persist in the `agy models` subcommand**, which still hangs with 0 bytes outside a
+> TTY. Never call it from a script — use `known_models(refresh=True)`, which pulls the official list
+> out of `agy` itself in ~3.4s and **zero tokens**.
 
-### Four surfaces
+### Surfaces
 
 | Function | What it does |
 |---|---|
@@ -193,17 +232,19 @@ terminal, so output flows normally; we then strip ANSI/CSI/OSC and drop spinner 
 | `call_agy_parallel` | N concurrent jobs (concurrency cap + retry/backoff, order preserved) |
 | `pipeline` | chaining (output of A becomes input of B) |
 | `fanout_synthesize` | fan-out over N models → synthesis (council engine) |
+| `call_agy_handoff` | runs a task and returns the `orchestrate` handoff JSON contract |
+| `extract_json` | 3-level balanced parser, for when you cannot enforce a schema |
 
 ### Requirements
 
-- **Windows** (the fix depends on ConPTY) · **Python 3.12+** (tested on 3.12.9)
-- **`pywinpty>=3.0.5`** — the only dependency
-- The **`agy`** binary installed and logged in ([antigravity.google/cli](https://antigravity.google/cli)),
-  on `PATH` or at `~/AppData/Local/agy/bin/agy.exe`
+- **Python 3.10+** (tested on 3.12.9) · **no external dependencies** on the default path
+- The **`agy` 1.1.13+** binary installed and logged in
+  ([antigravity.google/cli](https://antigravity.google/cli)), on `PATH` or at
+  `~/AppData/Local/agy/bin/agy.exe`
+- `pywinpty` **optional**, only for `transport="pty"` (old agy)
 
-```bash
-pip install -r requirements.txt
-```
+Tested on Windows 11. The JSON transport has no Windows-specific dependency, but only Windows was
+verified.
 
 ### Quick start
 
@@ -215,30 +256,33 @@ sys.path.insert(0, r"<PATH>\call-agy\scripts")
 from agy import call_agy
 
 print(call_agy("What is 17*23? Answer the number only.",
-               model="Gemini 3.5 Flash (Low)", timeout=90))   # -> 391
+               model="Gemini 3.7 Flash (Low)", timeout=90))   # -> 391
 ```
 
-See [`examples.md`](examples.md) for parallel, pipeline, fan-out, CLI and `jobs.json`/`steps.json`
-examples.
+See [`examples.md`](examples.md) for parallel, pipeline, fan-out, structured output, handoff, CLI
+and `jobs.json`/`steps.json` examples.
 
 ### CLI
 
 ```bash
-python scripts/agy.py single   -p "What is 17*23?" --model "Gemini 3.5 Flash (Low)"
+python scripts/agy.py single   -p "What is 17*23?" --model "Gemini 3.7 Flash (Low)"
 python scripts/agy.py parallel --jobs jobs.json --max-concurrency 4 --retries 2
-python scripts/agy.py pipeline --steps steps.json
+python scripts/agy.py pipeline --steps steps.json --chain-conversation
 python scripts/agy.py fanout   -p "Question?" --models "Gemini 3.1 Pro (High);Claude Opus 4.6 (Thinking)"
-python scripts/agy.py models   [--refresh]
+python scripts/agy.py handoff  -p "Run the tests and report"
+python scripts/agy.py models   --refresh
 ```
 
 Exit codes: **0** all ok · **1** partial failure · **2** fatal error.
 
 ### Notes
 
-- Pass the **exact** model string. `agy` silently falls back to the default on an invalid model
-  (no error, `rc=0`), so pre-call validation is on by default. Run `agy models` for your IDs.
+- Pass the **exact** model string. An invalid model no longer falls back silently: `agy` returns
+  `rc=1`, `status:"ERROR"` and lists the valid IDs in `error`. Pre-call validation stays on by
+  default only to save that round-trip.
+- On timeout we kill the **process tree** (`taskkill /F /T` on Windows) — killing only the direct
+  child leaves MCP grandchildren holding the pipes.
 - Concurrency numbers and model IDs reflect empirical tests on one machine — tune to your hardware.
-- **Platform:** Windows only.
 
 ## License
 

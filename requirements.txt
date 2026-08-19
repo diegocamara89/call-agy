@@ -1,5 +1,12 @@
 # call-agy — dependencias
-# Unica dependencia real: pywinpty cria o ConPTY (pseudo-terminal Windows) que engana o agy
-# e faz ele emitir saida fora de um TTY interativo (contorna o bug #76).
-# Testado e confirmado: Python 3.12.9 + pywinpty 3.0.5 em Windows 11.
-pywinpty>=3.0.5
+#
+# O caminho PADRAO (transport="json") usa somente a stdlib do Python. Nao instale nada.
+#
+# pywinpty e OPCIONAL: so o transporte legado transport="pty" precisa dele. Ele existe para quem
+# ainda roda uma versao antiga do agy, onde o print mode sofria o bug TTY #76 (0 bytes fora de
+# TTY). No agy 1.1.13+ o print mode foi corrigido e o ConPTY virou desnecessario.
+#
+# Instale so se for usar transport="pty":
+#   pip install pywinpty
+#
+# pywinpty>=3.0.5   ; sys_platform == "win32"
