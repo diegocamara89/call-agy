@@ -238,8 +238,9 @@ from agy import fanout_synthesize
 
 verdict = fanout_synthesize(
     "Devo lancar um curso de $297 ou um workshop de $97 primeiro? Justifique.",
-    models=["Gemini 3.1 Pro (High)", "Gemini 3.7 Flash (High)", "Claude Opus 4.6 (Thinking)"],
-    synth_model="Claude Opus 4.6 (Thinking)",   # chairman forte (parametrizavel)
+    # GPT-OSS 120B fica de fora (desatualizado); Gemini sempre em (High); Opus reservado pro chairman.
+    models=["Gemini 3.1 Pro (High)", "Gemini 3.7 Flash (High)", "Claude Sonnet 4.6 (Thinking)"],
+    synth_model="Claude Opus 4.6 (Thinking)",   # chairman forte, desacoplado do pool de advisors
     max_concurrency=5, retries=2, timeout=180, seed=42,
 )
 print(verdict.text)   # verdict e um CallResult
@@ -252,7 +253,8 @@ Council COMPLETO (5 personas + peer-review) e composto a mao com as primitivas â
 from agy import call_agy_parallel, call_agy
 
 QUESTION = "Devo lancar um curso de $297 ou um workshop de $97 primeiro?"
-models = ["Gemini 3.1 Pro (High)", "Gemini 3.7 Flash (High)", "Claude Opus 4.6 (Thinking)"]
+# GPT-OSS 120B fica de fora (desatualizado); Gemini sempre em (High); Opus reservado pro chairman.
+models = ["Gemini 3.1 Pro (High)", "Gemini 3.7 Flash (High)", "Claude Sonnet 4.6 (Thinking)"]
 
 # FAN-OUT
 advisors = call_agy_parallel([{"prompt": QUESTION, "model": m} for m in models],
