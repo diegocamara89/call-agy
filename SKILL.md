@@ -1,6 +1,6 @@
 ---
 name: call-agy
-description: Use quando precisar chamar o agy (Antigravity CLI do Google) a partir de codigo/automacao em vez do terminal interativo - capturar a saida programaticamente, escolher modelo via --model, forcar saida estruturada com json_schema, continuar uma conversa por conversation_id, ou orquestrar varias chamadas (paralelo, pipeline, fan-out/council). Tambem quando o agy voltar vazio, travar sem imprimir nada, ou parecer ignorar o --model. TRIGGERS (PT) - chamar agy, rodar agy, usar o agy, agy via script, agy nao retorna nada, agy retorna vazio, agy travou, agy em paralelo, pipeline de agy, encadear agy, council com agy, saida estruturada do agy, handoff do agy, qual o modelo mais novo do agy, atualizar modelos do agy, checar agy models. TRIGGERS (EN) - call agy, run agy, agy returns empty, agy hangs, agy in parallel, agy pipeline, agy structured output, agy json schema.
+description: Use quando precisar chamar o agy (Antigravity CLI do Google) a partir de codigo/automacao em vez do terminal interativo - capturar a saida programaticamente, escolher modelo via --model, forcar saida estruturada com json_schema, continuar uma conversa por conversation_id, ou orquestrar varias chamadas (paralelo, pipeline, fan-out/council). Tambem quando o agy voltar vazio, travar sem imprimir nada, ou parecer ignorar o --model. TRIGGERS (PT) - chamar agy, rodar agy, usar o agy, agy via script, agy nao retorna nada, agy retorna vazio, agy travou, agy em paralelo, pipeline de agy, encadear agy, council com agy, saida estruturada do agy, handoff do agy, qual o modelo mais novo do agy, atualizar modelos do agy, checar agy models, logs do agy, debugar agy. TRIGGERS (EN) - call agy, run agy, agy returns empty, agy hangs, agy in parallel, agy pipeline, agy structured output, agy json schema, agy debug, agy logs.
 ---
 
 # call-agy - chamando o Antigravity CLI (agy) de forma confiavel
@@ -11,6 +11,18 @@ encadeamento, fan-out -> sintese e handoff estruturado.
 
 Nao use para rodar `agy` interativamente (chame `agy` direto no terminal). Esta skill e o caminho
 programatico.
+
+### Duas camadas do Antigravity — nao confunda
+
+1. **Comandos de shell** (`agy -p "..."`, `agy help`, `agy plugin`, `agy update`, `agy changelog`) —
+   rodam no terminal/subprocess. E aqui que esta skill opera.
+2. **Slash commands da sessao interativa** (`/config`, `/permissions`, `/skills`, `/mcp`, `/model`,
+   `/agents`) — so existem DENTRO do TUI do `agy` aberto interativamente. **Nunca passe um slash
+   command como argv de shell** — `agy /skills` nao faz o que parece.
+
+Administrar o `agy` em si (plugins, settings, historico) e escopo da skill oficial
+`antigravity-cli`, nao desta — ver `references/environment.md` para o mapa de pastas e diagnostico
+via logs.
 
 ---
 
@@ -66,6 +78,25 @@ porque o `cmd.exe` interpreta `{`, `}`, `|` e `%`. **Isso vale para chamada via 
 esta skill.** Passamos argv como lista com `shell=False`, entao o `cmd.exe` nunca ve o prompt.
 Verificado: `{"a":1} | 50% & <x> \`y\` $HOME` chegou intacto ao modelo. O limite pratico tambem
 sobe de 8191 (cmd.exe) para 32767 chars (`CreateProcess`).
+
+### Flags essenciais (ja implementadas em `_build_argv`)
+
+| Flag | kwarg em `call_agy_result`/`call_agy_parallel` | O que faz |
+|---|---|---|
+| `-p` / `--output-format json` | (sempre ligado pela skill) | modo nao-interativo + envelope JSON |
+| `--model` | `model` | ID literal do catalogo abaixo |
+| `--effort` | `effort` | so pra modelo SEM tier no nome — ver aviso mais abaixo |
+| `--conversation` / `--continue` | `conversation` / `continue_last` | retoma sessao existente |
+| `--json-schema` | `json_schema` | forca `structured_output` no envelope |
+| `--dangerously-skip-permissions` | `skip_permissions` | auto-aprova tool calls, sem pausar pedindo confirmacao |
+| `--sandbox` | `sandbox` | restringe **comandos de terminal** — NAO impede escrita fora do `cwd` (medido; ver "Isolamento: detectar, nao confinar" mais abaixo). Nao trate como fronteira de seguranca. |
+| `--add-dir` (repetivel) | `add_dirs` | diretorios extras de contexto — tambem so contexto, nao confinamento |
+| `--mode` | `mode` | ex. `accept-edits` (usado por `call_agy_handoff`) |
+| `--print-timeout` | (derivado de `timeout`) | mantido igual ao timeout do modulo, relogios alinhados |
+
+> `--worktree`/`-w` (isolar em git worktree dedicado) existe no `agy` mas **nao esta implementado**
+> em `_build_argv` hoje — usa-lo via `call_agy*` exigiria um patch em `scripts/agy.py`. Nao
+> documente como disponivel ate ser adicionado de verdade.
 
 ---
 
@@ -296,6 +327,8 @@ com `}` — parse direto via `jq` ou Python, como manda o contrato do `orchestra
 - `tests/test_agy.py` - testes puros (offline, `SKIP_LIVE=1`) + vivos (chamam o agy de verdade).
 - `examples.md` - exemplos copiaveis.
 - `requirements.txt` - vazio no caminho padrao; `pywinpty` so para `transport="pty"`.
+- `references/environment.md` - mapa de pastas do Antigravity (`settings.json`, logs, plugins,
+  historico) e diagnostico via log quando o `CallResult` sozinho nao basta.
 
 ---
 
@@ -310,6 +343,10 @@ com `}` — parse direto via `jq` ou Python, como manda o contrato do `orchestra
 | `structured` e `None` numa chamada com schema | modelo devolveu so prosa | `call_agy_handoff` ja cai no `extract_json`; para schema proprio, chame-o voce |
 | Timeout de 120s levou 280s | kill sem `/T` deixou netos MCP vivos | ja tratado por `_kill_tree` — se reaparecer, verifique se nao esta chamando o agy por fora do modulo |
 | Prompt chegou truncado/corrompido | montou a chamada como string de shell | passe argv como lista, `shell=False` (o modulo ja faz) |
+
+Se `status`/`error` do `CallResult` nao derem a causa (ex.: falha de auth, violacao de rede), o
+proximo lugar a olhar sao os logs do proprio `agy` — nao algo que esta skill inspeciona
+automaticamente, mas util pra voce (ou o agente) ler na mao. Ver `references/environment.md`.
 
 ---
 
