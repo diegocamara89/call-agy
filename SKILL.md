@@ -85,15 +85,27 @@ alta** de cada familia — hoje a linha Flash atual e a **3.7**; 3.6 e 3.5 segue
 | `Gemini 3.1 Pro (Low)` | Gemini | medio | analise pontual |
 | `Claude Sonnet 4.6 (Thinking)` | Claude | lento | raciocinio, review |
 | `Claude Opus 4.6 (Thinking)` | Claude | lento | chairman/sintese (**SYNTH_MODEL**) |
-| `GPT-OSS 120B (Medium)` | GPT-OSS | medio | diversidade extra no council |
+| ~~`GPT-OSS 120B (Medium)`~~ | GPT-OSS | medio | **NAO USAR** — ver regra abaixo |
+
+> **Regra (2026-09-04) — nunca use `GPT-OSS 120B`.** Modelo desatualizado frente as familias
+> Gemini/Claude atuais do catalogo. Continua listado so por completude/retrocompatibilidade — nao
+> escolha para council, fan-out, pipeline ou qualquer chamada nova.
+>
+> **Regra (2026-09-04) — Gemini sempre em tier `(High)` para raciocinio.** `(Low)`/`(Medium)` sao
+> so para probe/triagem (ex.: `PROBE_MODEL = Gemini 3.7 Flash (Low)`, validacao de modelo, checagens
+> de ~3-6s sem consumo relevante). Qualquer chamada que produza uma OPINIAO, ANALISE ou RESPOSTA que
+> alguem vai ler — fan-out, council, pipeline, handoff — usa `(High)` (`Gemini 3.7 Flash (High)` ou
+> `Gemini 3.1 Pro (High)`).
 
 - **Default** (sem `--model`): vem de `~/.gemini/antigravity-cli/settings.json` -> hoje
   `Gemini 3.7 Flash (High)`. Esse default e do **usuario** e pode mudar sem a skill saber: se o
   caso precisa de um modelo especifico, **passe `--model` explicitamente**.
 - **Chairman/sintese** usa `SYNTH_MODEL = Claude Opus 4.6 (Thinking)`, desacoplado do default de
   proposito (herdar um Flash rebaixaria a sintese).
-- Para **council**, rotacione familias diferentes (Pro / Flash / Claude / GPT-OSS). Nao monte um
-  council com 3.7 + 3.6 + 3.5 Flash: sao versoes do mesmo modelo, nao opinioes independentes.
+- Para **council**, rotacione familias diferentes (`Gemini 3.1 Pro (High)` / `Gemini 3.7 Flash (High)`
+  / `Claude Sonnet 4.6 (Thinking)`) — sempre no tier `(High)`/`(Thinking)`, nunca Low/Medium fora de
+  probe. Nao monte um council com 3.7 + 3.6 + 3.5 Flash: sao versoes do mesmo modelo, nao opinioes
+  independentes. **Nao inclua `GPT-OSS 120B`** (ver regra acima).
 
 ### Modelo invalido: o agy AGORA erra alto
 
@@ -139,9 +151,17 @@ texto = call_agy("Quanto e 17*23? Responda so o numero.",
                  model="Gemini 3.7 Flash (Low)", timeout=90)
 
 # Superficie estruturada: nunca levanta por EMPTY/TIMEOUT/AUTH/INVALID_MODEL.
-r = call_agy_result("Analise X", model="Gemini 3.1 Pro (High)", timeout=300, effort="high")
+r = call_agy_result("Analise X", model="Gemini 3.1 Pro (High)", timeout=300)
 r.ok, r.status, r.text, r.conversation_id, r.usage["total_tokens"]
 ```
+
+> **NAO passe `effort` junto de modelo que ja traz o tier no nome** — verificado em 2026-08-24.
+> Todos os 14 IDs do catalogo embutem o tier (`(High)`, `(Medium)`, `(Low)`, `(Thinking)`), e o agy
+> rejeita a combinacao com `status=INVALID_MODEL`:
+> `--effort is not supported for model "Gemini 3.7 Flash (High)"`.
+> O sintoma engana: parece catalogo velho, mas o ID esta certo — o parametro a mais e que invalida.
+> Escolha o tier trocando o ID (`(Low)` -> `(High)`), nunca por `effort`. Na pratica `effort` fica
+> inutil com o catalogo atual; trate-o como reservado para um modelo futuro sem tier no nome.
 
 `call_agy` levanta `AgyError` em modelo invalido e em timeout (mesmo com texto parcial — devolver
 resposta truncada como se fosse completa corrompe o pipeline downstream).
@@ -159,7 +179,7 @@ from agy import call_agy_parallel
 
 jobs = [
     {"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.1 Pro (Low)"},
-    {"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.7 Flash (Medium)", "effort": "high"},
+    {"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.7 Flash (High)"},   # tier no ID, sem effort
     ("Liste 3 riscos de X.", "Claude Sonnet 4.6 (Thinking)"),   # tupla tambem vale
 ]
 results = call_agy_parallel(jobs, max_concurrency=4, retries=2, timeout=180)
@@ -284,6 +304,7 @@ com `}` — parse direto via `jq` ou Python, como manda o contrato do `orchestra
 | Sintoma | Causa provavel | Correcao |
 |---|---|---|
 | Script trava e nao imprime nada | chamou `agy models` em subprocess | use `known_models(refresh=True)` |
+| `INVALID_MODEL` num ID que esta no catalogo | passou `effort` com modelo que ja tem tier no nome | remova `effort`; o tier vem do ID |
 | `status: "EMPTY"` com `raw_len=0` | agy antigo com o bug #76 no print mode | `agy update` |
 | Todos os advisors do council responderam igual | agy antigo fazendo fallback silencioso | atualize; hoje isso vira `INVALID_MODEL` |
 | `structured` e `None` numa chamada com schema | modelo devolveu so prosa | `call_agy_handoff` ja cai no `extract_json`; para schema proprio, chame-o voce |
@@ -410,7 +431,7 @@ chamam esta.
 | **Linha Flash atual** | `Gemini 3.7 Flash (Low/Medium/High)` |
 | **Linha Pro atual** | `Gemini 3.1 Pro (Low/High)` |
 | **Claude atual** | `Claude Opus 4.6 (Thinking)`, `Claude Sonnet 4.6 (Thinking)` |
-| **Outros** | `GPT-OSS 120B (Medium)` |
+| **Outros** | `GPT-OSS 120B (Medium)` — **nao usar** (ver regra em "Catalogo de modelos") |
 | **Total de IDs** | 14 |
 
 **Por que existe esta secao:** o Antigravity troca de versao sem avisar (a linha Flash foi 3.5 ->
