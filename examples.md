@@ -27,7 +27,7 @@ from agy import call_agy
 
 resp = call_agy(
     "Quanto e 17*23? Responda apenas o numero.",
-    model="Gemini 3.7 Flash (Low)",   # rapido/barato, bom p/ probes (PROBE_MODEL)
+    model="Gemini 3.8 Flash (Low)",   # rapido/barato, bom p/ probes (PROBE_MODEL)
     timeout=90,                        # tier Flash = FLASH_TIMEOUT
 )
 print(resp)   # -> 391
@@ -52,7 +52,7 @@ if r.ok:
 CLI:
 
 ```bash
-python scripts/agy.py single -p "Quanto e 17*23?" --model "Gemini 3.7 Flash (Low)"
+python scripts/agy.py single -p "Quanto e 17*23?" --model "Gemini 3.8 Flash (Low)"
 python scripts/agy.py single -p "..." --model "Gemini 3.1 Pro (High)" --effort high --json
 ```
 
@@ -67,7 +67,7 @@ jobs = [
     {"prompt": "Liste 3 riscos de lancar um produto sem validacao.",
      "model": "Gemini 3.1 Pro (Low)"},
     {"prompt": "Liste 3 riscos de lancar um produto sem validacao.",
-     "model": "Gemini 3.7 Flash (Medium)", "timeout": 90, "effort": "high"},
+     "model": "Gemini 3.8 Flash (Medium)", "timeout": 90},   # tier no ID, NUNCA combine com "effort"
     ("Liste 3 riscos de lancar um produto sem validacao.",
      "Claude Sonnet 4.6 (Thinking)", 300),                     # tupla (prompt, model, timeout)
 ]
@@ -86,7 +86,7 @@ CLI (com `jobs.json`):
 ```json
 [
   {"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.1 Pro (Low)"},
-  {"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.7 Flash (Medium)"}
+  {"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.8 Flash (Medium)"}
 ]
 ```
 
@@ -136,7 +136,7 @@ Com `initial` (vira `CallResult` sintetico no indice 0, acessivel via `{prev}`/`
 
 ```python
 res = pipeline(
-    [{"model": "Gemini 3.7 Flash (Low)", "prompt": "Resuma em 1 frase:\n\n{prev}"}],
+    [{"model": "Gemini 3.8 Flash (Low)", "prompt": "Resuma em 1 frase:\n\n{prev}"}],
     initial="Texto longo que ja tenho em maos...",
 )
 ```
@@ -159,7 +159,7 @@ from agy import call_agy_result
 
 r = call_agy_result(
     "Avalie o risco de fazer deploy numa sexta as 18h.",
-    model="Gemini 3.7 Flash (Low)",
+    model="Gemini 3.8 Flash (Low)",
     json_schema={
         "type": "object",
         "properties": {"nivel": {"type": "string", "enum": ["baixo", "medio", "alto"]},
@@ -193,7 +193,7 @@ if h.ok:
 CLI (stdout comeca com `{` e termina com `}` -> `jq` direto):
 
 ```bash
-python scripts/agy.py handoff -p "Rode os testes e reporte" --model "Gemini 3.7 Flash (High)" | jq .next_action
+python scripts/agy.py handoff -p "Rode os testes e reporte" --model "Gemini 3.8 Flash (High)" | jq .next_action
 ```
 
 Quando nao der para impor schema (resposta e prosa + JSON), use o extrator de 3 niveis:
@@ -239,7 +239,7 @@ from agy import fanout_synthesize
 verdict = fanout_synthesize(
     "Devo lancar um curso de $297 ou um workshop de $97 primeiro? Justifique.",
     # GPT-OSS 120B fica de fora (desatualizado); Gemini sempre em (High); Opus reservado pro chairman.
-    models=["Gemini 3.1 Pro (High)", "Gemini 3.7 Flash (High)", "Claude Sonnet 4.6 (Thinking)"],
+    models=["Gemini 3.1 Pro (High)", "Gemini 3.8 Flash (High)", "Claude Sonnet 4.6 (Thinking)"],
     synth_model="Claude Opus 4.6 (Thinking)",   # chairman forte, desacoplado do pool de advisors
     max_concurrency=5, retries=2, timeout=180, seed=42,
 )
@@ -254,7 +254,7 @@ from agy import call_agy_parallel, call_agy
 
 QUESTION = "Devo lancar um curso de $297 ou um workshop de $97 primeiro?"
 # GPT-OSS 120B fica de fora (desatualizado); Gemini sempre em (High); Opus reservado pro chairman.
-models = ["Gemini 3.1 Pro (High)", "Gemini 3.7 Flash (High)", "Claude Sonnet 4.6 (Thinking)"]
+models = ["Gemini 3.1 Pro (High)", "Gemini 3.8 Flash (High)", "Claude Sonnet 4.6 (Thinking)"]
 
 # FAN-OUT
 advisors = call_agy_parallel([{"prompt": QUESTION, "model": m} for m in models],
@@ -318,11 +318,11 @@ O codigo antigo continua funcionando via `scripts/call_agy.py` (ordem antiga dos
 
 ```python
 from call_agy import call_agy      # assinatura antiga: (prompt, timeout, model)
-print(call_agy("Oi", 90, "Gemini 3.7 Flash (Low)"))
+print(call_agy("Oi", 90, "Gemini 3.8 Flash (Low)"))
 ```
 
 ```bash
-python scripts/call_agy.py "Oi" --model "Gemini 3.7 Flash (Low)" --timeout 90
+python scripts/call_agy.py "Oi" --model "Gemini 3.8 Flash (Low)" --timeout 90
 ```
 
 Ele perde os campos novos do envelope (`conversation_id`, `usage`, `structured`) — codigo novo deve

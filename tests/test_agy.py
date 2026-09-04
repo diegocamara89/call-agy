@@ -224,7 +224,7 @@ def test_live_models_refresh() -> None:
     print("\n[LIVE known_models(refresh=True)]")
     models = known_models(refresh=True)
     check("14+ modelos", len(models) >= 14, f"n={len(models)}")
-    check("contem o Flash atual", "Gemini 3.7 Flash (Low)" in models)
+    check("contem o Flash atual", "Gemini 3.8 Flash (Low)" in models)
     check("contem o synth", "Claude Opus 4.6 (Thinking)" in models)
 
 

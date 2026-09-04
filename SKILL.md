@@ -31,7 +31,7 @@ via logs.
 **Chame o agy sempre com `-p` + `--output-format json`, argv como LISTA, `shell=False`.**
 
 ```bash
-agy -p "PROMPT" --model "Gemini 3.7 Flash (Low)" --output-format json
+agy -p "PROMPT" --model "Gemini 3.8 Flash (Low)" --output-format json
 ```
 
 Isso funciona por **pipe, redirect e subprocess comum**. O envelope que volta no stdout:
@@ -102,16 +102,19 @@ sobe de 8191 (cmd.exe) para 32767 chars (`CreateProcess`).
 
 ## Catalogo de modelos (IDs literais para `--model`)
 
-**Catalogo verificado em 2026-08-15** contra o proprio agy (14 IDs). Prefira sempre a **versao mais
-alta** de cada familia — hoje a linha Flash atual e a **3.7**; 3.6 e 3.5 seguem so como legado.
+**Catalogo verificado em 2026-09-04** contra o proprio agy (14 IDs, agy 1.1.26). Prefira sempre a
+**versao mais alta** de cada familia — hoje a linha Flash atual e a **3.8** (a 3.5 sumiu do catalogo
+desde a checagem anterior); 3.7 (ainda o **DEFAULT** do settings.json do usuario) e 3.6 seguem so
+como legado.
 
 | ID literal (`--model "..."`) | Familia | Velocidade | Uso sugerido |
 |---|---|---|---|
-| `Gemini 3.7 Flash (High)` | Gemini | rapido | **DEFAULT** do settings.json; analise leve |
-| `Gemini 3.7 Flash (Medium)` | Gemini | rapido | triagem |
-| `Gemini 3.7 Flash (Low)` | Gemini | rapido (~6s medido) | probes, triagem, fan-out leve (**PROBE_MODEL**) |
-| `Gemini 3.6 Flash (High/Medium/Low)` | Gemini | rapido | legado / diversidade no council |
-| `Gemini 3.5 Flash (High/Medium/Low)` | Gemini | medio | legado |
+| `Gemini 3.8 Flash (High)` | Gemini | rapido | mais nova da linha Flash; analise leve |
+| `Gemini 3.8 Flash (Medium)` | Gemini | rapido | triagem |
+| `Gemini 3.8 Flash (Low)` | Gemini | rapido | probes, triagem, fan-out leve (**PROBE_MODEL**) |
+| `Gemini 3.7 Flash (High)` | Gemini | rapido | **DEFAULT** do settings.json (usuario ainda nao migrou pra 3.8) |
+| `Gemini 3.7 Flash (Medium/Low)` | Gemini | rapido | legado |
+| `Gemini 3.6 Flash (High/Medium/Low)` | Gemini | rapido | legado |
 | `Gemini 3.1 Pro (High)` | Gemini | lento (Thinking) | analise arquitetural, fan-out serio |
 | `Gemini 3.1 Pro (Low)` | Gemini | medio | analise pontual |
 | `Claude Sonnet 4.6 (Thinking)` | Claude | lento | raciocinio, review |
@@ -123,19 +126,20 @@ alta** de cada familia — hoje a linha Flash atual e a **3.7**; 3.6 e 3.5 segue
 > escolha para council, fan-out, pipeline ou qualquer chamada nova.
 >
 > **Regra (2026-09-04) — Gemini sempre em tier `(High)` para raciocinio.** `(Low)`/`(Medium)` sao
-> so para probe/triagem (ex.: `PROBE_MODEL = Gemini 3.7 Flash (Low)`, validacao de modelo, checagens
+> so para probe/triagem (ex.: `PROBE_MODEL = Gemini 3.8 Flash (Low)`, validacao de modelo, checagens
 > de ~3-6s sem consumo relevante). Qualquer chamada que produza uma OPINIAO, ANALISE ou RESPOSTA que
-> alguem vai ler — fan-out, council, pipeline, handoff — usa `(High)` (`Gemini 3.7 Flash (High)` ou
+> alguem vai ler — fan-out, council, pipeline, handoff — usa `(High)` (`Gemini 3.8 Flash (High)` ou
 > `Gemini 3.1 Pro (High)`).
 
 - **Default** (sem `--model`): vem de `~/.gemini/antigravity-cli/settings.json` -> hoje
-  `Gemini 3.7 Flash (High)`. Esse default e do **usuario** e pode mudar sem a skill saber: se o
-  caso precisa de um modelo especifico, **passe `--model` explicitamente**.
+  `Gemini 3.7 Flash (High)` (confirmado 2026-09-04 — o default do usuario nao acompanhou a 3.8
+  sozinho). Esse default e do **usuario** e pode mudar sem a skill saber: se o caso precisa de um
+  modelo especifico, **passe `--model` explicitamente**.
 - **Chairman/sintese** usa `SYNTH_MODEL = Claude Opus 4.6 (Thinking)`, desacoplado do default de
   proposito (herdar um Flash rebaixaria a sintese).
-- Para **council**, rotacione familias diferentes (`Gemini 3.1 Pro (High)` / `Gemini 3.7 Flash (High)`
+- Para **council**, rotacione familias diferentes (`Gemini 3.1 Pro (High)` / `Gemini 3.8 Flash (High)`
   / `Claude Sonnet 4.6 (Thinking)`) — sempre no tier `(High)`/`(Thinking)`, nunca Low/Medium fora de
-  probe. Nao monte um council com 3.7 + 3.6 + 3.5 Flash: sao versoes do mesmo modelo, nao opinioes
+  probe. Nao monte um council com 3.8 + 3.7 + 3.6 Flash: sao versoes do mesmo modelo, nao opinioes
   independentes. **Nao inclua `GPT-OSS 120B`** (ver regra acima).
 
 ### Modelo invalido: o agy AGORA erra alto
@@ -179,7 +183,7 @@ sys.path.insert(0, r"<CAMINHO>\call-agy\scripts")
 from agy import call_agy, call_agy_result
 
 texto = call_agy("Quanto e 17*23? Responda so o numero.",
-                 model="Gemini 3.7 Flash (Low)", timeout=90)
+                 model="Gemini 3.8 Flash (Low)", timeout=90)
 
 # Superficie estruturada: nunca levanta por EMPTY/TIMEOUT/AUTH/INVALID_MODEL.
 r = call_agy_result("Analise X", model="Gemini 3.1 Pro (High)", timeout=300)
@@ -200,7 +204,7 @@ resposta truncada como se fosse completa corrompe o pipeline downstream).
 CLI:
 
 ```bash
-python scripts/agy.py single -p "Quanto e 17*23?" --model "Gemini 3.7 Flash (Low)" --json
+python scripts/agy.py single -p "Quanto e 17*23?" --model "Gemini 3.8 Flash (Low)" --json
 ```
 
 ### Modo 2 - paralelo (fan-out)
@@ -210,7 +214,7 @@ from agy import call_agy_parallel
 
 jobs = [
     {"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.1 Pro (Low)"},
-    {"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.7 Flash (High)"},   # tier no ID, sem effort
+    {"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.8 Flash (High)"},   # tier no ID, sem effort
     ("Liste 3 riscos de X.", "Claude Sonnet 4.6 (Thinking)"),   # tupla tambem vale
 ]
 results = call_agy_parallel(jobs, max_concurrency=4, retries=2, timeout=180)
@@ -260,7 +264,7 @@ texto. So faz sentido quando todos os steps usam o mesmo modelo.
 from agy import call_agy_result, call_agy_handoff, HANDOFF_SCHEMA
 
 # Schema arbitrario -> r.structured vem como dict parseado.
-r = call_agy_result("Avalie o deploy de sexta.", model="Gemini 3.7 Flash (Low)",
+r = call_agy_result("Avalie o deploy de sexta.", model="Gemini 3.8 Flash (Low)",
                     json_schema={"type": "object",
                                  "properties": {"risco": {"type": "string"},
                                                 "acao": {"type": "string"}},
@@ -290,7 +294,8 @@ from agy import fanout_synthesize
 
 verdict = fanout_synthesize(
     "Devo lancar um curso de $297 ou um workshop de $97 primeiro?",
-    models=["Gemini 3.1 Pro (High)", "Gemini 3.7 Flash (High)", "Claude Opus 4.6 (Thinking)"],
+    # GPT-OSS fica de fora (desatualizado); Opus reservado pro chairman, nao entra no pool.
+    models=["Gemini 3.1 Pro (High)", "Gemini 3.8 Flash (High)", "Claude Sonnet 4.6 (Thinking)"],
     synth_model="Claude Opus 4.6 (Thinking)", max_concurrency=5, seed=42,
 )
 print(verdict.text)
@@ -429,7 +434,7 @@ ferramenta de escrita. Logo `cwd` e `--add-dir` sao contexto, **nao fronteira de
 
 | Tarefa | Modelo | Por que |
 |---|---|---|
-| Implementar sob testes | `Gemini 3.7 Flash (High)` | rapido; o teste e o juiz, nao precisa de thinking |
+| Implementar sob testes | `Gemini 3.8 Flash (High)` | rapido; o teste e o juiz, nao precisa de thinking |
 | Extrair/medir dados de log | `Gemini 3.1 Pro (High)` | volume grande, mas **confira as conclusoes** |
 | Tarefa longa de codigo | Flash, e **fatie** | Pro High estourou 300s numa tarefa media |
 
@@ -462,17 +467,18 @@ chamam esta.
 
 | Campo | Valor |
 |---|---|
-| **Ultima verificacao** | **2026-08-15** |
-| **Proxima revisao (a partir de)** | **2026-08-30** |
-| **Versao do agy verificada** | **1.1.13** |
-| **Linha Flash atual** | `Gemini 3.7 Flash (Low/Medium/High)` |
+| **Ultima verificacao** | **2026-09-04** |
+| **Proxima revisao (a partir de)** | **2026-09-19** |
+| **Versao do agy verificada** | **1.1.26** |
+| **Linha Flash atual** | `Gemini 3.8 Flash (Low/Medium/High)` (3.7 segue como **DEFAULT** do usuario; 3.5 sumiu do catalogo) |
 | **Linha Pro atual** | `Gemini 3.1 Pro (Low/High)` |
 | **Claude atual** | `Claude Opus 4.6 (Thinking)`, `Claude Sonnet 4.6 (Thinking)` |
 | **Outros** | `GPT-OSS 120B (Medium)` — **nao usar** (ver regra em "Catalogo de modelos") |
 | **Total de IDs** | 14 |
 
 **Por que existe esta secao:** o Antigravity troca de versao sem avisar (a linha Flash foi 3.5 ->
-3.6 -> 3.7). O catalogo aqui e um espelho manual e fica velho sozinho.
+3.6 -> 3.7 -> 3.8, e o `DEFAULT_MODEL` do usuario nem sempre acompanha). O catalogo aqui e um
+espelho manual e fica velho sozinho.
 
 **Regra para o agente:** se hoje for **>= "Proxima revisao"** e a tarefa envolver escolher modelo do
 agy, revalide antes de rodar o trabalho:
