@@ -1,6 +1,6 @@
 ---
 name: call-agy
-description: Use quando precisar chamar o agy (Antigravity CLI do Google) a partir de codigo/automacao em vez do terminal interativo - capturar a saida programaticamente, escolher modelo via --model, forcar saida estruturada com json_schema, continuar uma conversa por conversation_id, ou orquestrar varias chamadas (paralelo, pipeline, fan-out/council). Tambem quando o agy voltar vazio, travar sem imprimir nada, ou parecer ignorar o --model. TRIGGERS (PT) - chamar agy, rodar agy, usar o agy, agy via script, agy nao retorna nada, agy retorna vazio, agy travou, agy em paralelo, pipeline de agy, encadear agy, council com agy, saida estruturada do agy, handoff do agy, qual o modelo mais novo do agy, atualizar modelos do agy, checar agy models, logs do agy, debugar agy. TRIGGERS (EN) - call agy, run agy, agy returns empty, agy hangs, agy in parallel, agy pipeline, agy structured output, agy json schema, agy debug, agy logs.
+description: Use quando precisar chamar o agy (Antigravity CLI do Google) a partir de codigo/automacao em vez do terminal interativo - capturar a saida programaticamente, escolher modelo via --model, forcar saida estruturada com json_schema, continuar uma conversa por conversation_id, ou orquestrar varias chamadas (paralelo, pipeline, fan-out/council). Tambem quando o agy voltar vazio, travar sem imprimir nada, ou parecer ignorar o --model. E quando a duvida for o que ele gera de midia: imagem e nativa (generate_image, saida .jpg no brain), video e audio NAO existem como ferramenta. TRIGGERS (PT) - chamar agy, rodar agy, usar o agy, agy via script, agy nao retorna nada, agy retorna vazio, agy travou, agy em paralelo, pipeline de agy, encadear agy, council com agy, saida estruturada do agy, handoff do agy, qual o modelo mais novo do agy, atualizar modelos do agy, checar agy models, logs do agy, debugar agy, agy gera imagem, agy gera video, agy gera audio, geracao de imagem com agy, onde o agy salva a imagem. TRIGGERS (EN) - call agy, run agy, agy returns empty, agy hangs, agy in parallel, agy pipeline, agy structured output, agy json schema, agy debug, agy logs, agy generate image, agy generate video, agy image output path.
 ---
 
 # call-agy - chamando o Antigravity CLI (agy) de forma confiavel
@@ -102,17 +102,16 @@ sobe de 8191 (cmd.exe) para 32767 chars (`CreateProcess`).
 
 ## Catalogo de modelos (IDs literais para `--model`)
 
-**Catalogo verificado em 2026-09-04** contra o proprio agy (14 IDs, agy 1.1.26). Prefira sempre a
-**versao mais alta** de cada familia — hoje a linha Flash atual e a **3.8** (a 3.5 sumiu do catalogo
-desde a checagem anterior); 3.7 (ainda o **DEFAULT** do settings.json do usuario) e 3.6 seguem so
-como legado.
+**Catalogo verificado em 2026-09-17** contra o proprio agy (14 IDs, agy 1.2.5). Prefira sempre a
+**versao mais alta** de cada familia — hoje a linha Flash atual e a **3.8**, que o usuario ja adotou
+como **DEFAULT** no settings.json; 3.7 e 3.6 seguem so como legado.
 
 | ID literal (`--model "..."`) | Familia | Velocidade | Uso sugerido |
 |---|---|---|---|
-| `Gemini 3.8 Flash (High)` | Gemini | rapido | mais nova da linha Flash; analise leve |
+| `Gemini 3.8 Flash (High)` | Gemini | rapido | **DEFAULT** do settings.json; mais nova da linha Flash |
 | `Gemini 3.8 Flash (Medium)` | Gemini | rapido | triagem |
 | `Gemini 3.8 Flash (Low)` | Gemini | rapido | probes, triagem, fan-out leve (**PROBE_MODEL**) |
-| `Gemini 3.7 Flash (High)` | Gemini | rapido | **DEFAULT** do settings.json (usuario ainda nao migrou pra 3.8) |
+| `Gemini 3.7 Flash (High)` | Gemini | rapido | legado |
 | `Gemini 3.7 Flash (Medium/Low)` | Gemini | rapido | legado |
 | `Gemini 3.6 Flash (High/Medium/Low)` | Gemini | rapido | legado |
 | `Gemini 3.1 Pro (High)` | Gemini | lento (Thinking) | analise arquitetural, fan-out serio |
@@ -132,8 +131,8 @@ como legado.
 > `Gemini 3.1 Pro (High)`).
 
 - **Default** (sem `--model`): vem de `~/.gemini/antigravity-cli/settings.json` -> hoje
-  `Gemini 3.7 Flash (High)` (confirmado 2026-09-04 — o default do usuario nao acompanhou a 3.8
-  sozinho). Esse default e do **usuario** e pode mudar sem a skill saber: se o caso precisa de um
+  `Gemini 3.8 Flash (High)` (confirmado 2026-09-17). Esse default e do **usuario** e pode mudar sem
+  a skill saber: se o caso precisa de um
   modelo especifico, **passe `--model` explicitamente**.
 - **Chairman/sintese** usa `SYNTH_MODEL = Claude Opus 4.6 (Thinking)`, desacoplado do default de
   proposito (herdar um Flash rebaixaria a sintese).
@@ -446,6 +445,96 @@ Prefira `call_agy_handoff` quando o agy for executar tarefa de codigo: o contrat
 
 ---
 
+## Geracao de midia: so imagem e nativa
+
+Secao empirica, medida em 2026-09-17 contra agy 1.2.5 (Windows local + VPS Oracle-SP).
+
+| Midia | Ferramenta nativa | Veredito |
+|---|---|---|
+| **Imagem** | `generate_image` | **existe e funciona** |
+| **Video** | nenhuma | **nao existe** |
+| **Audio / TTS** | nenhuma | **nao existe** |
+
+Duas evidencias independentes, nao a palavra do modelo:
+
+1. O manifesto de ferramentas da sessao tem 17 entradas (`run_command`, `read_url_content`,
+   `replace_file_content`, `write_to_file`, `view_file`, `grep_search`, `find_by_name`, `list_dir`,
+   `ask_question`, `schedule`, `manage_task`, `generate_image`, `invoke_subagent`,
+   `manage_subagents`, `define_subagent`, `send_message`, `search_web`) — **uma so** e de midia.
+2. O binario do agy so carrega handlers `browser`, `ephemeral` e `imagegen`. `GenerateVideo`
+   aparece la, mas como protobuf da lib vendorizada do prediction service, **nao** como tool
+   exposta. Nao confunda string no binario com capacidade.
+
+### O modo de falha: ele "gera video" com ffmpeg e relata como se fosse generativo
+
+Pedir video ou audio ao agy **nao** devolve erro. Ele cai no `run_command` e monta o arquivo com
+ferramentas locais — e depois descreve o resultado em linguagem generativa. Caso medido:
+
+- **Audio pedido** ("WAV de 3s, so ferramentas nativas") -> `python3 -c 'import wave, math, struct'`.
+  Resultado: senoide pura de 440 Hz. Zero geracao.
+- **Video pedido** ("raposa cibernetica correndo, 3s, audio sincronizado") -> `generate_image` para
+  UMA foto (essa parte e real) + `ffmpeg zoompan` para esticar em 90 frames + mux do beep.
+  Relatorio dele: *"movimentacao dinamica de camera e pulso ritmico sincronizado ao audio"*.
+  Medicao do arquivo: **diferenca maxima de 1 nivel de cinza entre o frame 0 e o 89** — video
+  totalmente estatico. O `zoompan` usava `in` em vez de `on`, bug classico do ffmpeg que congela a
+  expressao. Nem o pan falso funcionou.
+
+E o mesmo padrao de "coleta bem e conclui mal" da secao anterior, agora sobre a propria entrega.
+**Regra: para video e audio, o agy nao e backend — e um wrapper de ffmpeg que se autoavalia bem.**
+Se voce quer ffmpeg, chame ffmpeg e escreva o filtro voce. Se voce quer geracao de verdade, o agy
+nao serve.
+
+### Onde a imagem cai: a saida sai em DOIS passos
+
+Medido no brain de uma geracao real. Nao existe "o arquivo da imagem" — existem dois, e eles nao
+sao intercambiaveis.
+
+| Passo | Quem escreve | Nome | Quando |
+|---|---|---|---|
+| 1. saida crua | `generate_image` | `<ImageName>_<epoch_ms>.jpg` | na hora da tool call |
+| 2. artefato nomeado | o proprio agy, via `run_command` | o nome que o PROMPT pediu (ex.: `.png`) | minutos depois |
+
+```
+06:03  ana_brunch_fullbody_1789376606563.jpg   <- passo 1, sempre JPG, sempre com timestamp
+06:06  ana_brunch_fullbody.png                 <- passo 2, so existe se o prompt pediu
+```
+
+O passo 2 so acontece se o prompt mandar (`"Save the generated image as a PNG."`). Se o prompt nao
+pedir, existe so o JPG cru.
+
+> **Nao "corrija" um glob de `*.png` adicionando `*.jpg`.** Um pipeline que varre so `*.png` esta
+> mirando o artefato do passo 2 de proposito. Aceitar `.jpg` faz ele publicar a saida crua em
+> silencio quando o passo 2 falhar, trocando um erro alto ("nao produziu PNG") por uma entrega
+> errada. Decida qual dos dois voce quer e varra so aquele.
+
+Os dois passos caem em `~/.gemini/antigravity-cli/brain/<conversation_id>/`. O envelope JSON **nao**
+devolve o path, entao colher o arquivo e sempre uma varredura — com tres cuidados:
+
+- **Ignore `.tempmediaStorage/`** (copia de trabalho) e `reference_image*` (entrada, nao saida).
+- **O diretorio e por conversa**, com id novo a cada run: varra recursivamente a partir de `brain/`.
+- **"O mais novo do brain" tem corrida.** O mtime nao diz de QUEM e o arquivo. Com duas geracoes
+  simultaneas, a que terminar depois pode levar a imagem da outra — e as duas reportam sucesso.
+
+O jeito de amarrar o arquivo a chamada, sem depender de nome nem de mtime: **tire um snapshot dos
+diretorios de `brain/` antes da chamada e restrinja a busca aos que apareceram depois.**
+
+```python
+def brain_conversations(brain):
+    try:
+        return {d for d in os.listdir(brain) if os.path.isdir(os.path.join(brain, d))}
+    except OSError:
+        return set()
+
+before = brain_conversations(BRAIN)
+run_agy(prompt)                                  # cria uma conversa nova
+novas = brain_conversations(BRAIN) - before      # <- o escopo desta chamada
+```
+
+Se `novas` vier vazio (o agy reusou uma conversa), ai sim caia na varredura do brain inteiro — e
+saiba que naquele caminho a corrida continua de pe.
+
+---
+
 ## Posicionamento (vs llm-council / orchestrate)
 
 - Esta skill e o **motor de transporte reusavel**: "como chamar o agy de forma confiavel". Ela
@@ -467,10 +556,10 @@ chamam esta.
 
 | Campo | Valor |
 |---|---|
-| **Ultima verificacao** | **2026-09-04** |
-| **Proxima revisao (a partir de)** | **2026-09-19** |
-| **Versao do agy verificada** | **1.1.26** |
-| **Linha Flash atual** | `Gemini 3.8 Flash (Low/Medium/High)` (3.7 segue como **DEFAULT** do usuario; 3.5 sumiu do catalogo) |
+| **Ultima verificacao** | **2026-09-17** |
+| **Proxima revisao (a partir de)** | **2026-10-02** |
+| **Versao do agy verificada** | **1.2.5** |
+| **Linha Flash atual** | `Gemini 3.8 Flash (Low/Medium/High)` — a `(High)` e o **DEFAULT** do usuario |
 | **Linha Pro atual** | `Gemini 3.1 Pro (Low/High)` |
 | **Claude atual** | `Claude Opus 4.6 (Thinking)`, `Claude Sonnet 4.6 (Thinking)` |
 | **Outros** | `GPT-OSS 120B (Medium)` — **nao usar** (ver regra em "Catalogo de modelos") |

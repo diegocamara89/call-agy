@@ -87,14 +87,14 @@ KNOWN_MODELS: tuple[str, ...] = (
 
 # Data (ISO) da ultima verificacao do catalogo, e a janela de revalidacao.
 # Sem historico: sobrescreva a data a cada checagem, mude ou nao a lista.
-CATALOG_CHECKED = "2026-09-04"
+CATALOG_CHECKED = "2026-09-17"
 CATALOG_RECHECK_DAYS = 15
 
 # Default do settings.json (~/.gemini/antigravity-cli/settings.json). So documentacao: para usar
-# o default NAO passe --model (omitir e diferente de passar o ID). Verificado 2026-09-04: o
-# settings.json real ainda aponta 3.7, mesmo com 3.8 ja disponivel no catalogo — nao assuma que o
-# default acompanha a familia mais nova sozinho.
-DEFAULT_MODEL = "Gemini 3.7 Flash (High)"
+# o default NAO passe --model (omitir e diferente de passar o ID).
+# Espelha o settings.json do usuario (confirmado 2026-09-17). E um valor DELE: pode mudar sem a
+# skill saber, entao passe --model explicitamente quando o caso exigir um modelo especifico.
+DEFAULT_MODEL = "Gemini 3.8 Flash (High)"
 # Chairman/sintese: tier de raciocinio, NAO segue o default do settings.json de proposito
 # (rebaixar a sintese para um Flash degradaria o fanout/council).
 SYNTH_MODEL = "Claude Opus 4.6 (Thinking)"
