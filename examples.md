@@ -41,7 +41,7 @@ Diagnostico estruturado (nunca levanta por EMPTY/TIMEOUT/AUTH/INVALID_MODEL):
 ```python
 from agy import call_agy_result
 
-r = call_agy_result("Analise X", model="Gemini 3.1 Pro (High)", timeout=300, effort="high")
+r = call_agy_result("Analise X", model="Gemini 3.1 Pro (High)", timeout=300)   # tier vem do ID; sem effort
 print(r.status, r.ok, r.elapsed_s)              # OK | EMPTY | TIMEOUT | AUTH_ERROR | INVALID_MODEL
 print(r.usage["total_tokens"], r.num_turns)     # custo real da chamada
 print(r.conversation_id)                        # reaproveitavel (ver exemplo 5)
@@ -53,7 +53,7 @@ CLI:
 
 ```bash
 python scripts/agy.py single -p "Quanto e 17*23?" --model "Gemini 3.8 Flash (Low)"
-python scripts/agy.py single -p "..." --model "Gemini 3.1 Pro (High)" --effort high --json
+python scripts/agy.py single -p "..." --model "Gemini 3.1 Pro (High)" --json
 ```
 
 ---
