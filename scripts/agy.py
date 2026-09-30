@@ -7,21 +7,16 @@ Tres capacidades + dois helpers de composicao:
     3. pipeline                     -> encadeamento sequencial (saida de A vira entrada de B)
     +. fanout_synthesize            -> fan-out (N modelos no mesmo prompt) -> reduce/sintese
     +. call_agy_handoff             -> handoff JSON estruturado (contrato da skill `orchestrate`)
+    +. generate_image               -> UMA imagem via tool nativa, amarrada a conversa (brain/<id>)
 
-TRANSPORTE (verificado em 2026-08-15 contra agy 1.1.13):
-    `agy -p "prompt" --output-format json` funciona por pipe, redirect e subprocess comum.
-    O bug TTY #76 (0 bytes fora de TTY) foi corrigido no PRINT MODE. Nao ha mais necessidade de
-    ConPTY/pywinpty no caminho normal. O envelope JSON entrega, alem do texto:
+TRANSPORTE:
+    `agy -p "prompt" --output-format json` por subprocess comum. O envelope entrega, alem do texto:
         conversation_id, status (SUCCESS|ERROR), error, duration_seconds, num_turns,
         usage{input/output/thinking/cache_read/total_tokens}, structured_output (com --json-schema)
-
-    ATENCAO - o bug #76 PERSISTE no subcomando `agy models`: ele TRAVA com 0 bytes fora de um TTY
-    (medido: rc=124 em timeout de 45s). Por isso known_models(refresh=True) NAO usa `agy models`;
-    usa o probe de modelo invalido (ver _probe_model_catalog), que responde em ~3.6s e custa
-    ZERO tokens.
-
-    Fallback ConPTY: transport="pty" (ou auto-heal quando o JSON volta 0 bytes) mantem o caminho
-    antigo via pywinpty, para quem estiver preso a uma versao antiga do agy.
+    `agy models` TRAVA fora de TTY: known_models(refresh=True) usa o probe de modelo invalido
+    (~4 s, zero tokens). transport="pty" (pywinpty) so para agy antigo.
+    Sem `model`, o modulo usa DEFAULT_MODEL (nunca o default do settings.json, que pode ser Claude).
+    Cota esgotada vira status QUOTA_EXHAUSTED e NUNCA e retentada.
 
 PROMPT VIA ARGV (seguro):
     Passamos argv como LISTA com shell=False -> o cmd.exe nunca ve o prompt. Verificado: chaves,
@@ -33,7 +28,8 @@ Requisito:
     Nenhum no caminho padrao (so a stdlib). pywinpty e OPCIONAL, apenas para transport="pty".
 
 CLI:
-    python agy.py single   -p "prompt" [--model "ID"] [--effort low|medium|high] [--timeout N]
+    python agy.py single   -p "prompt" [--model "ID"] [--timeout N]
+    python agy.py image    -p "prompt" --dest saida.png [--ref foto.png]
     python agy.py parallel --jobs jobs.json [--max-concurrency 4] [--retries 2] [--timeout 180]
     python agy.py pipeline --steps steps.json [--timeout 180] [--no-fail-fast]
     python agy.py fanout   -p "prompt" --models "A;B;C" [--synth-model "ID"] [--timeout 180]
@@ -51,6 +47,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -87,13 +84,13 @@ KNOWN_MODELS: tuple[str, ...] = (
 
 # Data (ISO) da ultima verificacao do catalogo, e a janela de revalidacao.
 # Sem historico: sobrescreva a data a cada checagem, mude ou nao a lista.
-CATALOG_CHECKED = "2026-09-17"
+CATALOG_CHECKED = "2026-09-30"
 CATALOG_RECHECK_DAYS = 15
 
-# Default do settings.json (~/.gemini/antigravity-cli/settings.json). So documentacao: para usar
-# o default NAO passe --model (omitir e diferente de passar o ID).
-# Espelha o settings.json do usuario (confirmado 2026-09-17). E um valor DELE: pode mudar sem a
-# skill saber, entao passe --model explicitamente quando o caso exigir um modelo especifico.
+# Modelo usado quando quem chama NAO passa `model`. O agy cru usaria o default do settings.json
+# (~/.gemini/antigravity-cli/settings.json), que e do usuario e pode ser um Claude (em 2026-09-30
+# era "Claude Opus 4.6 (Thinking)") — o balde de cota menor, que esgota. Por isso o modulo nunca
+# omite --model: sem `model`, vai este Flash (High), do balde Gemini.
 DEFAULT_MODEL = "Gemini 3.8 Flash (High)"
 # Chairman/sintese: tier de raciocinio, NAO segue o default do settings.json de proposito
 # (rebaixar a sintese para um Flash degradaria o fanout/council).
@@ -106,7 +103,7 @@ FLASH_TIMEOUT = 90    # tier rapido (Flash Low/Medium)
 THINK_TIMEOUT = 300   # tier lento (Pro High, Sonnet/Opus Thinking)
 
 # ID sentinela usado so para arrancar do agy a lista oficial de modelos (ele responde rc=1 com
-# "Available models:" e a lista). Custa 0 tokens e ~3.6s — nao consome inferencia.
+# "Available models:" e a lista). Custa 0 tokens e ~4 s — nao consome inferencia.
 _CATALOG_PROBE_ID = "__agy_py_catalog_probe__"
 
 # Guarda de memoria do leitor (defesa em profundidade; nunca atingida em uso normal).
@@ -131,11 +128,22 @@ _STDERR_NOISE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Sintomas transitorios (rate-limit / sobrecarga) -> dispara retry.
+# Sintomas transitorios (rate-limit / sobrecarga / cota de janela curta) -> dispara retry.
 _RATE_RE = re.compile(
-    r"\b(429|rate.?limit|too many requests|quota|overloaded|timeout)\b",
+    r"\b(429|rate.?limit|too many requests|quota|resource.?exhausted|overloaded|timeout)\b",
     re.IGNORECASE,
 )
+
+# Mensagens de cota do agy. A MESMA frase aparece com janela curta e longa — nos logs reais:
+# "Individual quota reached ... Resets in 16s" (volta sozinha) e "... Resets in 4h12m" (so volta
+# trocando a conta). O que decide e o tempo de reset (ver _is_quota_exhausted).
+_QUOTA_RE = re.compile(
+    r"quota (?:has been )?(?:reached|exceeded|exhausted)|resets in \d|daily (?:limit|quota)|billing quota",
+    re.IGNORECASE,
+)
+_RESET_RE = re.compile(r"resets in\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?", re.IGNORECASE)
+# Cota que so volta depois disto e tratada como esgotada (parar e avisar); abaixo, e retentada.
+QUOTA_FATAL_SECONDS = 600
 
 # Heuristica de falta de autenticacao. Pode ser TRANSITORIO (cota mascarada de auth).
 _AUTH_RE = re.compile(r"login|auth|unauthorized|sign in|not logged", re.IGNORECASE)
@@ -184,7 +192,7 @@ class CallResult:
     ok: bool
     text: str
     model: str | None
-    status: str  # "OK" | "EMPTY" | "INVALID_MODEL" | "AUTH_ERROR" | "TIMEOUT" | "ERROR"
+    status: str  # "OK" | "EMPTY" | "INVALID_MODEL" | "AUTH_ERROR" | "QUOTA_EXHAUSTED" | "TIMEOUT" | "ERROR"
     error: str | None
     elapsed_s: float
     attempts: int = 1
@@ -217,6 +225,40 @@ def _find_agy() -> str:
 def _looks_rate_limited(text: str | None) -> bool:
     """True se o texto/erro casar com sintoma transitorio de rate-limit/sobrecarga."""
     return bool(text) and bool(_RATE_RE.search(text))
+
+
+def _reset_seconds(text: str | None) -> int | None:
+    """Segundos ate a cota voltar, lidos de "Resets in 4h12m" / "Resets in 16s"; None se ausente."""
+    m = _RESET_RE.search(text or "")
+    if not m or not any(m.groups()):
+        return None
+    h, mi, s = (int(g or 0) for g in m.groups())
+    return h * 3600 + mi * 60 + s
+
+
+def _is_quota_exhausted(*texts: str | None) -> bool:
+    """True se algum texto indicar cota esgotada DE VERDADE (volta em >= QUOTA_FATAL_SECONDS).
+
+    Janela curta ("Resets in 16s") ou cota por minuto e transitoria: fica para o retry.
+    """
+    for t in texts:
+        if not t or not _QUOTA_RE.search(t):
+            continue
+        segundos = _reset_seconds(t)
+        if segundos is not None:
+            if segundos >= QUOTA_FATAL_SECONDS:
+                return True
+            continue
+        if re.search(r"per.?minute", t, re.IGNORECASE):
+            continue
+        return True
+    return False
+
+
+def _model_family(model: str | None) -> str:
+    """Balde de cota do modelo: 'claude' ou 'gemini' (cada um esgota separado)."""
+    m = (model or DEFAULT_MODEL).strip().lower()
+    return "claude" if m.startswith("claude") else ("gemini" if m.startswith("gemini") else m)
 
 
 def _is_auth_error(raw: str | None) -> bool:
@@ -576,15 +618,18 @@ def call_agy_result(
 
     Args:
         prompt: prompt enviado ao agy (vai por argv, sem passar pelo shell).
-        model: ID literal (ver KNOWN_MODELS). None usa o default do settings.json.
+        model: ID literal (ver KNOWN_MODELS). None usa DEFAULT_MODEL (Flash High, balde Gemini) —
+            nunca o default do settings.json, que pode ser um Claude de cota pequena.
         timeout: tempo maximo em segundos (use o tier do modelo; nunca <60s).
         validate_model: checa o ID contra KNOWN_MODELS antes de gastar o round-trip.
         cwd: diretorio de trabalho do agy. Default = home (workspace confiavel).
-        effort: "low" | "medium" | "high" — esforco de raciocinio da sessao.
+        effort: "low" | "medium" | "high" | "max" — so para modelo SEM tier no nome; com tier
+            (todos os IDs do catalogo hoje) levanta AgyError, porque o agy responderia INVALID_MODEL.
         conversation: conversation_id de uma chamada anterior -> continua AQUELA sessao.
         continue_last: usa --continue (ultima conversa). Ignorado se `conversation` for dado.
         json_schema: dict (serializado p/ arquivo temporario) ou caminho de arquivo .json.
-            Forca saida estruturada -> CallResult.structured vem parseado.
+            Forca saida estruturada -> CallResult.structured vem parseado. A raiz precisa ser
+            {"type": "object", ...} (exigido pelo agy desde a 1.2.14).
         skip_permissions: --dangerously-skip-permissions (auto-aprova tool calls).
         sandbox: --sandbox (restricoes de terminal).
         mode: "accept-edits" | "plan".
@@ -602,6 +647,12 @@ def call_agy_result(
     """
     if transport not in {"auto", "json", "pty"}:
         raise AgyError(f"transport invalido: {transport!r}. Use 'auto', 'json' ou 'pty'.")
+
+    if model is None:
+        model = DEFAULT_MODEL
+    if effort and re.search(r"\((?:High|Medium|Low|Thinking)\)\s*$", model):
+        raise AgyError(f"effort={effort!r} nao combina com {model!r}, que ja traz o tier no nome "
+                       "(o agy responderia INVALID_MODEL). Escolha o tier trocando o ID.")
 
     if validate_model and model is not None and model not in KNOWN_MODELS:
         raise AgyError(
@@ -679,6 +730,8 @@ def call_agy_result(
                 return _mk(False, "", "EMPTY",
                            f"Saida vazia e fallback PTY indisponivel: {exc}")
         detail = stderr_clean or repr(stdout[:200])
+        if _is_quota_exhausted(stderr_clean, stdout):
+            return _mk(False, "", "QUOTA_EXHAUSTED", f"Cota do agy esgotada: {detail}")
         return _mk(False, "", "EMPTY" if raw_len == 0 else "ERROR",
                    f"Envelope JSON ausente (rc={rc}, raw_len={raw_len}). Saida: {detail}")
 
@@ -700,6 +753,9 @@ def call_agy_result(
     }
 
     if status_field == "ERROR" or (rc not in (0, None) and err_field):
+        # Cota esgotada vem antes de auth: ela as vezes se mascara de erro de auth.
+        if _is_quota_exhausted(err_field, stderr_clean):
+            return _mk(False, "", "QUOTA_EXHAUSTED", (err_field or stderr_clean).strip(), **extra)
         # O agy AGORA erra explicitamente em modelo invalido — sem fallback silencioso.
         if _INVALID_MODEL_RE.search(err_field):
             return _mk(False, "", "INVALID_MODEL", err_field.strip(), **extra)
@@ -710,6 +766,9 @@ def call_agy_result(
 
     text = response.strip()
     if not text and not extra["structured"]:
+        if _is_quota_exhausted(err_field, stderr_clean):
+            return _mk(False, "", "QUOTA_EXHAUSTED",
+                       f"Cota do agy esgotada: {err_field or stderr_clean}", **extra)
         return _mk(False, "", "EMPTY",
                    f"status={status_field} mas response vazio (raw_len={raw_len}).", **extra)
 
@@ -738,6 +797,9 @@ def call_agy(
                         validate_model=validate_model, cwd=cwd, **kwargs)
     if r.status == "INVALID_MODEL":
         raise AgyError(r.error or "Modelo invalido.")
+    if r.status == "QUOTA_EXHAUSTED":
+        raise AgyError("Cota do agy esgotada: pare e avise o usuario para trocar a conta. "
+                       + (r.error or ""))
     if raise_on_empty and r.status in {"EMPTY", "AUTH_ERROR", "TIMEOUT", "ERROR"}:
         raise AgyError(r.error or f"agy retornou {r.status}.")
     if r.status == "TIMEOUT":
@@ -793,6 +855,9 @@ def call_agy_parallel(
     Por job, independente:
         retry  -> status in {EMPTY, TIMEOUT, AUTH_ERROR} OU erro/texto casa _looks_rate_limited.
         fatal  -> INVALID_MODEL (o agy agora reporta explicitamente; retentar so queima tempo).
+        fatal  -> QUOTA_EXHAUSTED (reset >= QUOTA_FATAL_SECONDS), e os jobs do MESMO balde
+                  (Gemini ou Claude) que ainda nao comecaram voltam QUOTA_EXHAUSTED sem chamar o
+                  agy. Cota de janela curta e retentada esperando o reset (ate 120 s).
         backoff = retry_backoff * attempt + jitter(0..1s).
 
     Args:
@@ -808,6 +873,11 @@ def call_agy_parallel(
         list[CallResult] alinhada a `jobs`.
     """
     results: list[CallResult | None] = [None] * len(jobs)
+    # Cota esgotada num job vale para os jobs do MESMO balde (Gemini ou Claude): os que ainda nao
+    # comecaram nem tentam — senao um lote de 20 gastaria 20 round-trips para ouvir a mesma
+    # resposta. O outro balde segue normal (council misto nao perde as respostas dele).
+    esgotadas: set[str] = set()
+    trava = threading.Lock()
 
     def _run_one(raw_job: dict | tuple) -> CallResult:
         try:
@@ -824,6 +894,12 @@ def call_agy_parallel(
         try:
             while attempt <= retries:
                 attempt += 1
+                with trava:
+                    ja_esgotou = _model_family(model) in esgotadas
+                if ja_esgotou:
+                    return CallResult(False, "", model or DEFAULT_MODEL, "QUOTA_EXHAUSTED",
+                                      "nao executado: cota deste balde esgotada em outro job do lote",
+                                      0.0, attempt, 0)
                 try:
                     r = call_agy_result(prompt, validate_model=validate_model, **job)
                 except AgyError as exc:
@@ -835,12 +911,20 @@ def call_agy_parallel(
                 last = r
                 if r.status == "OK":
                     return r
+                if r.status == "QUOTA_EXHAUSTED":  # fatal: parar e avisar, nunca retentar
+                    with trava:
+                        esgotadas.add(_model_family(r.model))
+                    return r
                 # AUTH_ERROR entra no conjunto retryavel: cota/rate-limit transitorio se
                 # mascara de auth. Se for auth genuino, esgota os retries e retorna AUTH_ERROR.
                 transient = r.status in {"EMPTY", "TIMEOUT", "AUTH_ERROR"} \
                     or _looks_rate_limited(r.error) or _looks_rate_limited(r.text)
                 if transient and attempt <= retries:
-                    time.sleep(retry_backoff * attempt + random.random())
+                    espera = retry_backoff * attempt + random.random()
+                    reset = _reset_seconds(r.error)   # cota de janela curta: esperar o reset
+                    if reset is not None:
+                        espera = max(espera, min(reset + 1, 120))
+                    time.sleep(espera)
                     continue
                 return r
             return last if last is not None else CallResult(
@@ -961,7 +1045,8 @@ def pipeline(
         if r.conversation_id:
             last_conv = r.conversation_id
 
-        if not r.ok and fail_fast:
+        # Cota esgotada para o pipeline mesmo com fail_fast=False: os proximos steps ouviriam o mesmo.
+        if not r.ok and (fail_fast or r.status == "QUOTA_EXHAUSTED"):
             return {"ok": False, "results": prev_outputs, "final": "", "failed_step": i}
 
     ok = bool(prev_outputs) and prev_outputs[-1].ok
@@ -1020,6 +1105,11 @@ def fanout_synthesize(
     advisors = call_agy_parallel(
         jobs, max_concurrency=max_concurrency, retries=retries, timeout=timeout, cwd=cwd
     )
+    # Nenhum advisor respondeu e a causa e cota: nao gastar o chairman sintetizando o vazio.
+    if not any(a.ok for a in advisors):
+        cota = next((a for a in advisors if a.status == "QUOTA_EXHAUSTED"), None)
+        if cota is not None:
+            return cota
     synth_prompt = builder(prompt, advisors)
     # Chairman via call_agy_parallel (1 job) para herdar retry/backoff.
     [chairman] = call_agy_parallel(
@@ -1066,6 +1156,179 @@ def call_agy_handoff(
             r.status = "ERROR"
             r.error = "Resposta sem structured_output e sem JSON extraivel do texto."
     return r
+
+
+# --------------------------------------------------------------------------- (5) Imagem
+
+
+# Onde o agy grava o que gera: uma pasta por conversa (conversation_id do envelope).
+BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
+# Subpastas do brain que NAO sao saida: copia de trabalho, entradas do usuario, artefatos do sistema.
+_BRAIN_SKIP = {".tempmediastorage", ".user_uploaded", ".system_generated", "scratch"}
+_IMG_EXT = (".png", ".jpg", ".jpeg", ".webp")
+# Quem escreve o prompt da tool generate_image; a imagem vem do gerador do proprio agy.
+IMAGE_MODEL = "Gemini 3.8 Flash (High)"
+
+
+@dataclass
+class ImageResult:
+    """Resultado de generate_image. `path` so e confiavel com ok=True.
+
+    status: "OK" | "RAW_ONLY" (so a saida crua; o PNG pedido nao foi salvo) | "NO_IMAGE" (nenhuma
+    imagem: recusa ou falha — o texto do agy fica em call.text) | qualquer status do CallResult
+    (QUOTA_EXHAUSTED, TIMEOUT, ...).
+    """
+
+    ok: bool
+    path: str | None
+    status: str
+    error: str | None
+    width: int | None = None
+    height: int | None = None
+    raw_path: str | None = None
+    call: CallResult | None = None
+
+
+def _image_size(path: str | Path) -> tuple[int, int] | None:
+    """(largura, altura) de PNG ou JPEG lendo so o cabecalho (stdlib; None se nao reconhecer)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(26)
+            if head[:8] == b"\x89PNG\r\n\x1a\n":
+                return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+            if head[:2] != b"\xff\xd8":
+                return None
+            f.seek(2)
+            while True:
+                b = f.read(1)
+                while b and b != b"\xff":
+                    b = f.read(1)
+                while b == b"\xff":
+                    b = f.read(1)
+                if not b:
+                    return None
+                marker = b[0]
+                if marker in (0xD9, 0xDA):  # fim da imagem / inicio dos dados sem ter achado o SOF
+                    return None
+                raw_len = f.read(2)
+                seg_len = int.from_bytes(raw_len, "big")
+                if len(raw_len) < 2 or seg_len < 2:  # truncado: sem isto o seek voltava e o laco nao saia
+                    return None
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    f.read(1)
+                    h = int.from_bytes(f.read(2), "big")
+                    w = int.from_bytes(f.read(2), "big")
+                    return (w, h) if w and h else None
+                f.seek(seg_len - 2, 1)
+    except (OSError, ValueError):
+        return None
+
+
+def _find_generated_image(conv_dir: Path) -> tuple[Path | None, Path | None]:
+    """(png_nomeado, saida_crua) mais novos dentro da pasta de UMA conversa do brain.
+
+    Ignora as subpastas que nao sao saida (_BRAIN_SKIP) e arquivos reference_image* (entrada).
+    PNG e o artefato que o prompt pediu; qualquer outro formato conta como saida crua.
+    """
+    png = raw = None
+    for base, dirs, files in os.walk(conv_dir):
+        dirs[:] = [d for d in dirs if d.lower() not in _BRAIN_SKIP]
+        for name in files:
+            low = name.lower()
+            if not low.endswith(_IMG_EXT) or low.startswith("reference_image"):
+                continue
+            p = Path(base) / name
+            if low.endswith(".png"):
+                if png is None or p.stat().st_mtime > png.stat().st_mtime:
+                    png = p
+            elif raw is None or p.stat().st_mtime > raw.stat().st_mtime:
+                raw = p
+    return png, raw
+
+
+def _brain_conversations(brain: Path) -> set[str]:
+    try:
+        return {d.name for d in brain.iterdir() if d.is_dir()}
+    except OSError:
+        return set()
+
+
+def generate_image(
+    prompt: str,
+    dest: str | Path,
+    *,
+    refs: list[str | Path] | tuple = (),
+    model: str = IMAGE_MODEL,
+    timeout: int = THINK_TIMEOUT,
+    cwd: str | None = None,
+    brain: Path | None = None,
+) -> ImageResult:
+    """
+    Gera UMA imagem com a tool nativa generate_image do agy e copia o PNG para `dest`.
+
+    A imagem e amarrada a ESTA chamada pelo conversation_id do envelope (pasta brain/<id>/), nao
+    por "o arquivo mais novo" — duas geracoes simultaneas nao trocam de arquivo. Sem id no
+    envelope, cai no snapshot: so as pastas de conversa que apareceram durante a chamada.
+
+    Args:
+        prompt: descricao da imagem (ver o gabarito em references/imagem.md). O modulo acrescenta
+            o pedido de salvar em PNG — e isso que produz o artefato colhido.
+        dest: arquivo .png de destino, ou pasta (mantem o nome gerado).
+        refs: imagens de referencia (entrada). Vao por caminho absoluto no texto do prompt, e as
+            pastas delas entram como --add-dir. Influenciam a identidade; nao a garantem.
+        model: quem orquestra a tool (Gemini Flash High por padrao: balde Gemini).
+        timeout: por chamada (geracoes medidas: 41-86 s; 300 s de teto).
+        cwd, brain: diretorio de trabalho do agy e pasta brain (testes).
+
+    Returns:
+        ImageResult. TIMEOUT nao significa que nao gerou: a pasta da conversa e varrida mesmo assim.
+    """
+    brain = brain or BRAIN_DIR
+    refs_abs = [str(Path(r).resolve()) for r in refs]
+    texto = prompt.rstrip()
+    if refs_abs:
+        texto += "\n\nReference image(s) — read them from disk: " + "; ".join(refs_abs)
+    texto += "\n\nUse the generate_image tool to create ONE image. Save the generated image as a PNG."
+    add_dirs = sorted({str(Path(r).parent) for r in refs_abs}) or None
+
+    antes = _brain_conversations(brain)
+    r = call_agy_result(texto, model=model, timeout=timeout, cwd=cwd, add_dirs=add_dirs)
+    if r.status in {"QUOTA_EXHAUSTED", "INVALID_MODEL", "AUTH_ERROR"}:
+        return ImageResult(False, None, r.status, r.error, call=r)
+
+    pastas: list[Path] = []
+    if r.conversation_id and (brain / r.conversation_id).is_dir():
+        pastas = [brain / r.conversation_id]
+    else:
+        novas = _brain_conversations(brain) - antes
+        pastas = [brain / n for n in novas] if len(novas) == 1 else []
+
+    png, raw = _find_generated_image(pastas[0]) if pastas else (None, None)
+
+    if png is None:
+        if raw is not None:  # erro alto: nao entregar a saida crua no lugar do PNG pedido
+            return ImageResult(False, None, "RAW_ONLY",
+                               f"o agy gerou {raw.name} mas nao salvou o PNG pedido",
+                               raw_path=str(raw), call=r)
+        st = "NO_IMAGE" if r.ok else r.status
+        motivo = (r.text or r.error or "sem imagem e sem explicacao").strip()[:500]
+        return ImageResult(False, None, st, f"nenhuma imagem gerada: {motivo}", call=r)
+
+    destino = Path(dest)
+    try:
+        if destino.is_dir() or (not destino.suffix and not destino.exists()):
+            destino.mkdir(parents=True, exist_ok=True)   # pasta: mantem o nome gerado
+            destino = destino / png.name
+        else:
+            if destino.suffix.lower() != ".png":        # o conteudo e PNG: o nome diz a verdade
+                destino = destino.with_suffix(".png")
+            destino.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(png, destino)
+    except OSError as exc:
+        return ImageResult(False, None, "ERROR", f"gerou {png} mas nao copiou para {dest}: {exc}",
+                           raw_path=str(raw) if raw else None, call=r)
+    tam = _image_size(destino) or (None, None)
+    return ImageResult(True, str(destino), "OK", None, tam[0], tam[1], raw_path=str(raw) if raw else None, call=r)
 
 
 # --------------------------------------------------------------------------- Catalogo de modelos
@@ -1140,6 +1403,14 @@ def _common_call_kwargs(args: argparse.Namespace) -> dict:
     }
 
 
+def _rc(results) -> int:
+    """0 tudo ok; 3 se algum esgotou a cota (parar e avisar); 1 outra falha."""
+    results = results if isinstance(results, list) else [results]
+    if any(getattr(r, 'status', '') == 'QUOTA_EXHAUSTED' for r in results):
+        return 3
+    return 0 if all(r.ok for r in results) else 1
+
+
 def _cmd_single(args: argparse.Namespace) -> int:
     r = call_agy_result(args.prompt, model=args.model, timeout=args.timeout,
                         validate_model=not args.no_validate, **_common_call_kwargs(args))
@@ -1149,7 +1420,7 @@ def _cmd_single(args: argparse.Namespace) -> int:
         if not r.ok:
             print(f"ERRO ({r.status}): {r.error}", file=sys.stderr)
         print(r.text)
-    return 0 if r.ok else 1
+    return _rc(r)
 
 
 def _cmd_parallel(args: argparse.Namespace) -> int:
@@ -1157,7 +1428,7 @@ def _cmd_parallel(args: argparse.Namespace) -> int:
     results = call_agy_parallel(jobs, max_concurrency=args.max_concurrency,
                                 retries=args.retries, timeout=args.timeout)
     print(_serialize(results))
-    return 0 if all(r.ok for r in results) else 1
+    return _rc(results)
 
 
 def _cmd_pipeline(args: argparse.Namespace) -> int:
@@ -1168,6 +1439,8 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
         "ok": result["ok"], "final": result["final"], "failed_step": result["failed_step"],
         "results": [asdict(r) for r in result["results"]],
     }, ensure_ascii=False, indent=2))
+    if any(r.status == "QUOTA_EXHAUSTED" for r in result["results"]):
+        return 3
     return 0 if result["ok"] else 1
 
 
@@ -1175,7 +1448,7 @@ def _cmd_fanout(args: argparse.Namespace) -> int:
     models = [m.strip() for m in args.models.split(";") if m.strip()]
     r = fanout_synthesize(args.prompt, models, synth_model=args.synth_model, timeout=args.timeout)
     print(_serialize(r))
-    return 0 if r.ok else 1
+    return _rc(r)
 
 
 def _cmd_handoff(args: argparse.Namespace) -> int:
@@ -1187,7 +1460,15 @@ def _cmd_handoff(args: argparse.Namespace) -> int:
         "changed_files": [], "tests_run": False, "risks": [],
         "analyst_summary": r.status, "next_action": "ESCALATE",
     }, ensure_ascii=False, indent=2))
-    return 0 if r.ok else 1
+    return _rc(r)
+
+
+def _cmd_image(args: argparse.Namespace) -> int:
+    r = generate_image(args.prompt, args.dest, refs=args.ref or (), model=args.model, timeout=args.timeout)
+    d = asdict(r)
+    d['call'] = None if r.call is None else {k: getattr(r.call, k) for k in ('status', 'conversation_id', 'elapsed_s', 'usage')}
+    print(json.dumps(d, ensure_ascii=False, indent=2))
+    return 3 if r.status == 'QUOTA_EXHAUSTED' else (0 if r.ok else 1)
 
 
 def _cmd_models(args: argparse.Namespace) -> int:
@@ -1199,14 +1480,16 @@ def _cmd_models(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="agy.py",
-        description="Chama o agy (Antigravity CLI): single / parallel / pipeline / fanout / handoff / models.",
+        description="Chama o agy (Antigravity CLI): single / parallel / pipeline / fanout / handoff / image / models. "
+                    "Saida: 0 ok, 1 falha, 2 erro de uso/ambiente, 3 cota do agy esgotada.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("single", help="Uma chamada do agy.")
     sp.add_argument("-p", "--prompt", required=True)
-    sp.add_argument("--model", default=None, help='ID literal (ex: "Gemini 3.7 Flash (Low)").')
-    sp.add_argument("--effort", default=None, choices=["low", "medium", "high"])
+    sp.add_argument("--model", default=None, help='ID literal (ex: "Gemini 3.8 Flash (Low)"). Sem ele: DEFAULT_MODEL.')
+    sp.add_argument("--effort", default=None, choices=["low", "medium", "high", "max"],
+                    help="So para modelo SEM tier no nome (hoje nenhum do catalogo).")
     sp.add_argument("--conversation", default=None, help="conversation_id para continuar a sessao.")
     sp.add_argument("--transport", default="auto", choices=["auto", "json", "pty"])
     sp.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
@@ -1241,6 +1524,14 @@ def main(argv: list[str] | None = None) -> int:
     hp.add_argument("--model", default=None)
     hp.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     hp.set_defaults(func=_cmd_handoff)
+
+    ip = sub.add_parser("image", help="Gera UMA imagem (generate_image) e copia o PNG para --dest.")
+    ip.add_argument("-p", "--prompt", required=True)
+    ip.add_argument("--dest", required=True, help="arquivo .png ou pasta")
+    ip.add_argument("--ref", action="append", help="imagem de referencia (repetivel)")
+    ip.add_argument("--model", default=IMAGE_MODEL)
+    ip.add_argument("--timeout", type=int, default=THINK_TIMEOUT)
+    ip.set_defaults(func=_cmd_image)
 
     mp = sub.add_parser("models", help="Lista KNOWN_MODELS (--refresh consulta o agy).")
     mp.add_argument("--refresh", action="store_true")

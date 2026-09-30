@@ -1,554 +1,286 @@
 ---
 name: call-agy
-description: Use quando precisar chamar o agy (Antigravity CLI do Google) a partir de codigo/automacao em vez do terminal interativo - capturar a saida programaticamente, escolher modelo via --model, forcar saida estruturada com json_schema, continuar uma conversa por conversation_id, ou orquestrar varias chamadas (paralelo, pipeline, fan-out/council). Tambem quando o agy voltar vazio, travar sem imprimir nada, ou parecer ignorar o --model. E quando a duvida for o que ele gera de midia: imagem e nativa (generate_image, saida .jpg no brain), video e audio NAO existem como ferramenta. TRIGGERS (PT) - chamar agy, rodar agy, usar o agy, agy via script, agy nao retorna nada, agy retorna vazio, agy travou, agy em paralelo, pipeline de agy, encadear agy, council com agy, saida estruturada do agy, handoff do agy, qual o modelo mais novo do agy, atualizar modelos do agy, checar agy models, logs do agy, debugar agy, agy gera imagem, agy gera video, agy gera audio, geracao de imagem com agy, onde o agy salva a imagem. TRIGGERS (EN) - call agy, run agy, agy returns empty, agy hangs, agy in parallel, agy pipeline, agy structured output, agy json schema, agy debug, agy logs, agy generate image, agy generate video, agy image output path.
+description: Use para delegar trabalho ao agy (Antigravity CLI do Google, modelos Gemini e Claude pela conta Google) a partir de codigo - segunda opiniao, council ou verificacao cruzada com outra familia de modelo, lote grande de leitura ou extracao que gastaria cota do Claude, gerar imagem, ver video. Tambem quando o agy voltar vazio, travar, esgotar a cota ou parecer usar o modelo errado. TRIGGERS - chamar agy, delegar ao agy, segunda opiniao, verificacao cruzada, council com agy, agy em paralelo, poupar cota do Claude, gerar imagem, agy gera imagem, agy gera video, ver video com agy, agy vazio, agy travou, cota do agy, modelos do agy.
 ---
 
-# call-agy - chamando o Antigravity CLI (agy) de forma confiavel
+# call-agy - delegar ao agy (Antigravity CLI) de forma confiavel
 
 `agy` e o CLI agentico do Google (antigravity.google/cli), no estilo do Claude Code. Esta skill e o
-**motor de transporte reusavel** para chama-lo de dentro de codigo: chamada unica, paralelo,
-encadeamento, fan-out -> sintese e handoff estruturado.
+**motor reusavel** para chama-lo de dentro de codigo: chamada unica, paralelo, encadeamento,
+fan-out -> sintese, handoff estruturado e geracao de imagem. Tudo vive em `scripts/agy.py`.
 
-Nao use para rodar `agy` interativamente (chame `agy` direto no terminal). Esta skill e o caminho
-programatico.
-
-### Duas camadas do Antigravity — nao confunda
-
-1. **Comandos de shell** (`agy -p "..."`, `agy help`, `agy plugin`, `agy update`, `agy changelog`) —
-   rodam no terminal/subprocess. E aqui que esta skill opera.
-2. **Slash commands da sessao interativa** (`/config`, `/permissions`, `/skills`, `/mcp`, `/model`,
-   `/agents`) — so existem DENTRO do TUI do `agy` aberto interativamente. **Nunca passe um slash
-   command como argv de shell** — `agy /skills` nao faz o que parece.
-
-Administrar o `agy` em si (plugins, settings, historico) e escopo da skill oficial
-`antigravity-cli`, nao desta — ver `references/environment.md` para o mapa de pastas e diagnostico
-via logs.
+Duas camadas, nao confunda: **comandos de shell** (`agy -p`, `agy help`, `agy update`,
+`agy changelog`) sao o que esta skill usa; **slash commands** (`/config`, `/model`, `/skills`...) so
+existem dentro do TUI interativo — nunca passe um como argv. Administrar o agy (plugins, settings,
+logs) nao e desta skill: ver `references/environment.md`.
 
 ---
 
-## O transporte: `--output-format json` (LEIA ANTES DE TUDO)
+## Quando delegar ao agy (e quando nao)
 
-**Chame o agy sempre com `-p` + `--output-format json`, argv como LISTA, `shell=False`.**
+A doutrina curta mora no `CLAUDE.md` do usuario; aqui fica o detalhe. Regra geral: **tente o agy
+nos casos abaixo; se ele falhar ou travar, o subagente proprio do Claude e o plano B. Cota
+esgotada e outra coisa: pare e avise o usuario (ver "Cota").**
 
-```bash
-agy -p "PROMPT" --model "Gemini 3.8 Flash (Low)" --output-format json
-```
+| Situacao | Quem faz | Por que |
+|---|---|---|
+| Gerar imagem | agy (`generate_image`) | so ele tem a ferramenta nativa |
+| Ver video (entender fluxo, cortes) | agy | le `.mp4`; numero pequeno de tela, leia em quadro de resolucao cheia |
+| Segunda opiniao, council, verificacao cruzada | agy | outra familia de modelo = opiniao independente |
+| Lote grande de leitura, extracao, contagem | agy | poupa a cota do Claude; peca `arquivo:linha` e confira |
+| Implementar sob testes ja escritos | agy (`call_agy_handoff`) | o teste e o juiz; gate mecanico antes de ler o diff |
+| Busca curta no repo, edicao que precisa desta sessao (MCP, Blender, Bambu) | subagente proprio | contexto e ferramentas locais |
+| Concluir, dar veredito, escrever os testes | Claude | o agy **coleta bem e conclui mal** (ver `references/delegacao.md`) |
+| Dado sigiloso (processo, investigacao, dado pessoal, extrato, credencial) | **nunca o agy** | servico externo; ele le o disco sozinho e `--sandbox` nao confina. Anonimize ou use subagente proprio |
+| Video ou audio GERADO | ninguem via agy | nao existe ferramenta; ele monta com ffmpeg e descreve como se fosse gerativo |
 
-Isso funciona por **pipe, redirect e subprocess comum**. O envelope que volta no stdout:
+A saida do agy e **candidato, nao fato**: reconfira cada `arquivo:linha` e decida pelo efeito
+verificado (testes, `git status`, arquivo), nunca pelo `status` da chamada.
+
+---
+
+## Transporte
+
+**Sempre `-p` + `--output-format json`, argv como LISTA, `shell=False`** (o modulo ja faz):
 
 ```json
 {"conversation_id":"74bf...","status":"SUCCESS","response":"4\n","duration_seconds":2.7,
  "num_turns":1,"usage":{"input_tokens":39623,"output_tokens":33,"total_tokens":39656}}
 ```
 
-Com `--json-schema`, ganha ainda `"structured_output": {...}` **ja parseado**.
+O envelope separa vazio de falha (`status` + `error`), traz `structured_output` ja parseado com
+`--json-schema`, o custo (`usage`) e o `conversation_id` para continuar a sessao.
 
-Tres coisas que o envelope resolve de graca e o modo texto nao dava:
+- **`agy models` trava fora de TTY.** Nunca o chame de script: use `known_models(refresh=True)`
+  (~4 s, zero tokens).
+- Prompt com `{}`, `|`, `%`, `&` chega intacto (argv em lista, o `cmd.exe` nao ve). Teto pratico
+  ~32 mil caracteres por argv: dado grande vai em arquivo e o prompt cita o caminho.
+- `transport="pty"` (pywinpty) so existe para agy antigo.
 
-| Problema | Como o envelope resolve |
-|---|---|
-| Distinguir resposta vazia de falha | `status` = `SUCCESS` \| `ERROR` + campo `error` |
-| Extrair JSON de prosa (`grep` guloso, ```` ```json ````) | `structured_output` vem parseado |
-| Saber o custo da chamada | `usage.total_tokens` por chamada |
-| Continuar a mesma conversa | `conversation_id` -> devolva em `--conversation` |
+### Flags (implementadas em `_build_argv`)
 
-### O que MUDOU (bug TTY #76) - verificado em 2026-08-15, agy 1.1.13
-
-O print mode **nao sofre mais** o bug de 0 bytes fora de TTY. Medido nesta maquina:
-
-| Comando | Resultado |
-|---|---|
-| `agy -p "..." > out.txt` | 2 bytes, correto |
-| `agy -p "..." --output-format json > out.json` | 252 bytes, JSON valido |
-| `agy -p "..." \| cat` | 454 bytes, resposta completa |
-| **`agy models`** (sem TTY) | **TRAVA, 0 bytes, rc=124 em 45s** |
-
-> **O bug PERSISTE no subcomando `agy models`.** Nunca o chame de dentro de um script.
-> Para listar modelos use `known_models(refresh=True)`, que arranca a lista oficial do proprio
-> agy via probe de modelo invalido: ~3.4s e **zero tokens** (ver "Manutencao do catalogo").
-
-O transporte ConPTY/`pywinpty` continua disponivel em `transport="pty"` para quem roda um agy
-antigo. Com `transport="auto"` (default), se o JSON voltar 0 bytes o modulo loga um aviso e tenta
-o ConPTY sozinho — mas a correcao de verdade e `agy update`.
-
-### Prompt com `{}`, `|`, `%`: seguro aqui
-
-A skill `orchestrate` documenta uma "regra de ouro": `-p "texto"` corrompe prompts no Windows
-porque o `cmd.exe` interpreta `{`, `}`, `|` e `%`. **Isso vale para chamada via shell, nao para
-esta skill.** Passamos argv como lista com `shell=False`, entao o `cmd.exe` nunca ve o prompt.
-Verificado: `{"a":1} | 50% & <x> \`y\` $HOME` chegou intacto ao modelo. O limite pratico tambem
-sobe de 8191 (cmd.exe) para 32767 chars (`CreateProcess`).
-
-### Flags essenciais (ja implementadas em `_build_argv`)
-
-| Flag | kwarg em `call_agy_result`/`call_agy_parallel` | O que faz |
+| Flag | kwarg | Observacao |
 |---|---|---|
-| `-p` / `--output-format json` | (sempre ligado pela skill) | modo nao-interativo + envelope JSON |
-| `--model` | `model` | ID literal do catalogo abaixo |
-| `--effort` | `effort` | so pra modelo SEM tier no nome — ver aviso mais abaixo |
-| `--conversation` / `--continue` | `conversation` / `continue_last` | retoma sessao existente |
-| `--json-schema` | `json_schema` | forca `structured_output` no envelope |
-| `--dangerously-skip-permissions` | `skip_permissions` | auto-aprova tool calls, sem pausar pedindo confirmacao |
-| `--sandbox` | `sandbox` | restringe **comandos de terminal** — NAO impede escrita fora do `cwd` (medido; ver "Isolamento: detectar, nao confinar" mais abaixo). Nao trate como fronteira de seguranca. |
-| `--add-dir` (repetivel) | `add_dirs` | diretorios extras de contexto — tambem so contexto, nao confinamento |
-| `--mode` | `mode` | ex. `accept-edits` (usado por `call_agy_handoff`) |
-| `--print-timeout` | (derivado de `timeout`) | mantido igual ao timeout do modulo, relogios alinhados |
+| `--model` | `model` | sempre passado (ver "Modelo padrao") |
+| `--conversation` / `--continue` | `conversation` / `continue_last` | retoma sessao |
+| `--json-schema` | `json_schema` | raiz precisa ser `{"type": "object"}` (agy 1.2.14+) |
+| `--dangerously-skip-permissions` | `skip_permissions` | auto-aprova tool calls |
+| `--sandbox` | `sandbox` | restringe **comandos de terminal**; NAO impede escrita fora do `cwd` |
+| `--add-dir` | `add_dirs` | contexto extra, nao confinamento |
+| `--mode` | `mode` | ex. `accept-edits` |
+| `--effort` | `effort` | so para modelo SEM tier no nome (hoje nenhum) |
+| `--print-timeout` | (derivado de `timeout`) | relogio do agy alinhado ao do modulo |
 
-> `--worktree`/`-w` (isolar em git worktree dedicado) existe no `agy` mas **nao esta implementado**
-> em `_build_argv` hoje — usa-lo via `call_agy*` exigiria um patch em `scripts/agy.py`. Nao
-> documente como disponivel ate ser adicionado de verdade.
+Existem no agy e o modulo ainda nao expoe: `--project`/`--new-project`, `--log-file`,
+`--disable-slash-commands`.
 
 ---
 
-## Catalogo de modelos (IDs literais para `--model`)
+## Catalogo de modelos
 
-**Catalogo verificado em 2026-09-17** contra o proprio agy (14 IDs, agy 1.2.5). Prefira sempre a
-**versao mais alta** de cada familia — hoje a linha Flash atual e a **3.8**, que o usuario ja adotou
-como **DEFAULT** no settings.json; 3.7 e 3.6 seguem so como legado.
+**Catalogo verificado em 2026-09-30** (agy 1.2.14, 14 IDs). Estas regras valem para toda a skill:
 
-| ID literal (`--model "..."`) | Familia | Velocidade | Uso sugerido |
-|---|---|---|---|
-| `Gemini 3.8 Flash (High)` | Gemini | rapido | **DEFAULT** do settings.json; mais nova da linha Flash |
-| `Gemini 3.8 Flash (Medium)` | Gemini | rapido | triagem |
-| `Gemini 3.8 Flash (Low)` | Gemini | rapido | probes, triagem, fan-out leve (**PROBE_MODEL**) |
-| `Gemini 3.7 Flash (High)` | Gemini | rapido | legado |
-| `Gemini 3.7 Flash (Medium/Low)` | Gemini | rapido | legado |
-| `Gemini 3.6 Flash (High/Medium/Low)` | Gemini | rapido | legado |
-| `Gemini 3.1 Pro (High)` | Gemini | lento (Thinking) | analise arquitetural, fan-out serio |
-| `Gemini 3.1 Pro (Low)` | Gemini | medio | analise pontual |
-| `Claude Sonnet 4.6 (Thinking)` | Claude | lento | raciocinio, review |
-| `Claude Opus 4.6 (Thinking)` | Claude | lento | chairman/sintese (**SYNTH_MODEL**) |
-| ~~`GPT-OSS 120B (Medium)`~~ | GPT-OSS | medio | **NAO USAR** — ver regra abaixo |
+- **Modelo padrao.** Sem `model`, o modulo usa `DEFAULT_MODEL = Gemini 3.8 Flash (High)`. Ele
+  nunca omite `--model`: o agy cru usaria o default do `settings.json` do usuario, que em
+  2026-09-30 era **Claude Opus 4.6 (Thinking)** — o balde de cota menor. Script que chama `agy -p`
+  direto, fora do modulo, precisa passar `--model` explicito pelo mesmo motivo.
+- **Tier (High) para qualquer resposta que alguem vai ler** (fan-out, council, pipeline, handoff).
+  `(Low)`/`(Medium)` so para probe e triagem.
+- **Nunca `GPT-OSS 120B`** — desatualizado; listado so por completude.
+- **Nunca `effort` com modelo que ja tem tier no nome**: o agy responde `INVALID_MODEL`. Escolha o
+  tier trocando o ID.
+- **Council**: familias diferentes (`Gemini 3.1 Pro (High)`, `Gemini 3.8 Flash (High)`,
+  `Claude Sonnet 4.6 (Thinking)`); 3.8 + 3.7 + 3.6 Flash sao o mesmo modelo, nao opinioes.
+  Chairman: `SYNTH_MODEL = Claude Opus 4.6 (Thinking)`.
 
-> **Regra (2026-09-04) — nunca use `GPT-OSS 120B`.** Modelo desatualizado frente as familias
-> Gemini/Claude atuais do catalogo. Continua listado so por completude/retrocompatibilidade — nao
-> escolha para council, fan-out, pipeline ou qualquer chamada nova.
->
-> **Regra (2026-09-04) — Gemini sempre em tier `(High)` para raciocinio.** `(Low)`/`(Medium)` sao
-> so para probe/triagem (ex.: `PROBE_MODEL = Gemini 3.8 Flash (Low)`, validacao de modelo, checagens
-> de ~3-6s sem consumo relevante). Qualquer chamada que produza uma OPINIAO, ANALISE ou RESPOSTA que
-> alguem vai ler — fan-out, council, pipeline, handoff — usa `(High)` (`Gemini 3.8 Flash (High)` ou
-> `Gemini 3.1 Pro (High)`).
+| ID literal (`--model "..."`) | Uso |
+|---|---|
+| `Gemini 3.8 Flash (High)` | **DEFAULT_MODEL**; implementar sob teste; imagem (`IMAGE_MODEL`) |
+| `Gemini 3.8 Flash (Medium)` | triagem |
+| `Gemini 3.8 Flash (Low)` | probes (**PROBE_MODEL**) |
+| `Gemini 3.7 Flash (High/Medium/Low)`, `Gemini 3.6 Flash (High/Medium/Low)` | legado |
+| `Gemini 3.1 Pro (High)` / `(Low)` | analise pesada / pontual |
+| `Claude Sonnet 4.6 (Thinking)` | raciocinio, review (balde Claude) |
+| `Claude Opus 4.6 (Thinking)` | chairman (**SYNTH_MODEL**, balde Claude) |
+| `GPT-OSS 120B (Medium)` | nao usar |
 
-- **Default** (sem `--model`): vem de `~/.gemini/antigravity-cli/settings.json` -> hoje
-  `Gemini 3.8 Flash (High)` (confirmado 2026-09-17). Esse default e do **usuario** e pode mudar sem
-  a skill saber: se o caso precisa de um
-  modelo especifico, **passe `--model` explicitamente**.
-- **Chairman/sintese** usa `SYNTH_MODEL = Claude Opus 4.6 (Thinking)`, desacoplado do default de
-  proposito (herdar um Flash rebaixaria a sintese).
-- Para **council**, rotacione familias diferentes (`Gemini 3.1 Pro (High)` / `Gemini 3.8 Flash (High)`
-  / `Claude Sonnet 4.6 (Thinking)`) — sempre no tier `(High)`/`(Thinking)`, nunca Low/Medium fora de
-  probe. Nao monte um council com 3.8 + 3.7 + 3.6 Flash: sao versoes do mesmo modelo, nao opinioes
-  independentes. **Nao inclua `GPT-OSS 120B`** (ver regra acima).
-
-### Modelo invalido: o agy AGORA erra alto
-
-Antes o agy fazia fallback silencioso para o default e voce rodava um council inteiro achando que
-tinha 5 modelos. **Isso acabou.** Com `--output-format json`, um `--model` invalido devolve `rc=1`,
-`status:"ERROR"` e um `error` que **lista os 14 IDs validos** — em ~4s e sem gastar token.
-
-A validacao pre-call (`validate_model=True`, default) sobreviveu, mas com papel menor: evitar o
-round-trip de 4s por job quando ha um typo num fanout. Um `KNOWN_MODELS` velho hoje causa, no pior
-caso, um falso negativo local — nao mais um council corrompido em silencio. Passe
-`validate_model=False` para deixar a validacao inteiramente com o agy.
+Modelo invalido erra alto: `rc=1`, `status: INVALID_MODEL` e a lista dos IDs validos, em ~4 s e
+sem token. A validacao local (`validate_model=True`) so poupa esse round-trip num fan-out com typo.
 
 ---
 
-## Timeout e tier de modelo
+## Cota
 
-Use o tier certo (cold-start e alguns segundos mesmo no Flash; nunca use `<60s`):
+- **Dois baldes**, da conta Google do usuario: **Gemini** (a familia inteira esgota junto) e
+  **Claude** (menor). Cada chamada carrega ~40 mil tokens fixos de contexto do agy; uma imagem
+  mediu ~100 mil (65 mil de cache).
+- A mesma frase `Individual quota reached ... Resets in X` aparece com janela **curta** (visto
+  `16s`) e **longa** (`4h12m`). O modulo decide pelo tempo: reset `>= QUOTA_FATAL_SECONDS` (600 s)
+  vira **`status: QUOTA_EXHAUSTED`**, que nunca e retentado; num lote, os jobs **do mesmo balde**
+  que ainda nao comecaram voltam `QUOTA_EXHAUSTED` sem chamar o agy (o outro balde segue). Janela
+  curta e cota por minuto sao retentadas esperando o reset (ate 120 s). `call_agy` levanta
+  `AgyError`; a CLI sai com codigo **3**; `fanout_synthesize` nao chama o chairman se nenhum
+  advisor respondeu por cota; `pipeline` para mesmo com `fail_fast=False`.
+- **Regra: cota esgotada = parar e avisar o usuario para trocar a conta.** Nao durma esperando
+  renovar e nao troque sozinho por subagente proprio.
 
-- `FLASH_TIMEOUT = 90` -> Flash Low/Medium.
-- `THINK_TIMEOUT = 300` -> Pro High, Sonnet/Opus Thinking, qualquer High/Thinking.
-- `DEFAULT_TIMEOUT = 180` -> compromisso de `call_agy`/`parallel`/`pipeline`. Sobrescreva por job
-  com `job["timeout"]` / `step["timeout"]`.
+---
 
-O modulo repassa o mesmo valor para o `--print-timeout` interno do agy, entao os dois relogios
-ficam alinhados. Em timeout, **mata a arvore de processos** (`taskkill /F /T` no Windows, padrao
-herdado do `orchestrate`): `proc.kill()` sozinho deixaria os servidores MCP netos vivos segurando
-os pipes, e um timeout de 120s viraria 279s+.
+## Timeout
+
+- `FLASH_TIMEOUT = 90` (Flash Low/Medium), `THINK_TIMEOUT = 300` (High/Thinking, imagem),
+  `DEFAULT_TIMEOUT = 180`. Nunca abaixo de 60 s (cold-start). Sobrescreva por job/step.
+- Em timeout o modulo mata a **arvore** de processos (`taskkill /F /T`): so `proc.kill()` deixaria
+  os servidores MCP netos segurando os pipes.
+- **`TIMEOUT` nao significa trabalho nao feito**: o agy trabalha no disco. Confira o efeito.
 
 ---
 
 ## Como chamar
 
-Tudo vive em `scripts/agy.py` (fonte da verdade). Importe como modulo ou use a CLI.
-
-### Modo 1 - chamada unica
-
 ```python
 import sys
 sys.path.insert(0, r"<CAMINHO>\call-agy\scripts")
-from agy import call_agy, call_agy_result
+from agy import (call_agy, call_agy_result, call_agy_parallel, pipeline, fanout_synthesize,
+                 call_agy_handoff, generate_image)
+```
 
-texto = call_agy("Quanto e 17*23? Responda so o numero.",
-                 model="Gemini 3.8 Flash (Low)", timeout=90)
+**Chamada unica.** `call_agy` devolve o texto e levanta `AgyError` em modelo invalido, timeout e
+cota. `call_agy_result` nunca levanta por falha do agy: devolve `CallResult`.
 
-# Superficie estruturada: nunca levanta por EMPTY/TIMEOUT/AUTH/INVALID_MODEL.
+```python
+texto = call_agy("Quanto e 17*23? So o numero.", model="Gemini 3.8 Flash (Low)", timeout=90)
 r = call_agy_result("Analise X", model="Gemini 3.1 Pro (High)", timeout=300)
 r.ok, r.status, r.text, r.conversation_id, r.usage["total_tokens"]
 ```
 
-> **NAO passe `effort` junto de modelo que ja traz o tier no nome** — verificado em 2026-08-24.
-> Todos os 14 IDs do catalogo embutem o tier (`(High)`, `(Medium)`, `(Low)`, `(Thinking)`), e o agy
-> rejeita a combinacao com `status=INVALID_MODEL`:
-> `--effort is not supported for model "Gemini 3.7 Flash (High)"`.
-> O sintoma engana: parece catalogo velho, mas o ID esta certo — o parametro a mais e que invalida.
-> Escolha o tier trocando o ID (`(Low)` -> `(High)`), nunca por `effort`. Na pratica `effort` fica
-> inutil com o catalogo atual; trate-o como reservado para um modelo futuro sem tier no nome.
+`status`: `OK` | `EMPTY` | `TIMEOUT` | `AUTH_ERROR` | `INVALID_MODEL` | `QUOTA_EXHAUSTED` | `ERROR`.
 
-`call_agy` levanta `AgyError` em modelo invalido e em timeout (mesmo com texto parcial — devolver
-resposta truncada como se fosse completa corrompe o pipeline downstream).
-
-CLI:
-
-```bash
-python scripts/agy.py single -p "Quanto e 17*23?" --model "Gemini 3.8 Flash (Low)" --json
-```
-
-### Modo 2 - paralelo (fan-out)
+**Paralelo.** Ordem preservada; falha parcial nunca aborta o lote.
 
 ```python
-from agy import call_agy_parallel
-
-jobs = [
-    {"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.1 Pro (Low)"},
-    {"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.8 Flash (High)"},   # tier no ID, sem effort
-    ("Liste 3 riscos de X.", "Claude Sonnet 4.6 (Thinking)"),   # tupla tambem vale
-]
+jobs = [{"prompt": "Liste 3 riscos de X.", "model": "Gemini 3.1 Pro (High)"},
+        ("Liste 3 riscos de X.", "Claude Sonnet 4.6 (Thinking)")]
 results = call_agy_parallel(jobs, max_concurrency=4, retries=2, timeout=180)
-# results[i] (CallResult) corresponde a jobs[i], NA ORDEM. Falha parcial nunca aborta o lote.
 ```
 
-**Concorrencia:** default `max_concurrency=4`, teto recomendado **6**. O cap e tunado pela
-**maquina** (RAM/CPU), nao pelo backend — o agy fala com Antigravity/Google direto, entao o quirk
-de 429 do `gemini`/OpenRouter nao se aplica. Probes reais: N=3 -> 3/3 ok (~2.75x speedup, zero
-429); N=5 -> 5/5 ok (~4x, zero 429). Para council de 5, suba para 5. Para lotes >20, processe em
-**ondas** de tamanho=cap.
+Concorrencia: default 4, teto 6 (limite e a RAM/CPU desta maquina; N=5 mediu ~4x sem 429).
+Lotes >20 em ondas. Retry em `EMPTY`/`TIMEOUT`/`AUTH_ERROR`/429/cota de janela curta; fatal em
+`INVALID_MODEL` e `QUOTA_EXHAUSTED`.
 
-Politica de retry (por job, independente):
-- **retry** quando `status in {EMPTY, TIMEOUT, AUTH_ERROR}` ou o erro/texto casa
-  `429|rate.?limit|quota|too many|overloaded|timeout`. Backoff = `retry_backoff*attempt + jitter`.
-  (`AUTH_ERROR` e retryavel de proposito: cota transitoria se mascara de erro de auth.)
-- **fatal, sem retry:** `INVALID_MODEL` — o agy reporta explicitamente, retentar so queima tempo.
-
-### Modo 3 - encadeamento / pipeline
-
-Cada step e um dict com kwargs de `call_agy_result` + **exatamente um** de:
-- `"builder"`: `Callable[[list[CallResult]], str]` — recebe **todas** as saidas anteriores e
-  devolve o prompt. Contrato canonico: robusto a `{`/`}` literais e permite anonimizar/concatenar.
-- `"prompt"`: str com placeholders `{prev}` / `{step_0}` / `{all}` (acucar; token ausente fica
-  literal, nunca levanta).
+**Pipeline.** Cada step: kwargs de `call_agy_result` + `builder` (`Callable[[list[CallResult]],
+str]`, canonico) ou `prompt` com `{prev}`/`{step_0}`/`{all}`. `chain_conversation=True` mantem uma
+sessao so (mesmo modelo em todos os steps).
 
 ```python
-from agy import pipeline
-
-steps = [
-    {"model": "Gemini 3.1 Pro (Low)",
-     "prompt": "Gere UMA ideia de feature para um app de seguros. Conciso."},
-    {"model": "Claude Opus 4.6 (Thinking)",
-     "builder": lambda prev: f"Critique e aponte 3 riscos:\n\n{prev[-1].text}"},
-]
-res = pipeline(steps, timeout=180, fail_fast=True)
-print(res["final"])   # {"ok", "results", "final", "failed_step"}
+res = pipeline([{"model": "Gemini 3.1 Pro (High)", "prompt": "Gere UMA ideia. Conciso."},
+                {"model": "Claude Opus 4.6 (Thinking)",
+                 "builder": lambda prev: f"Critique:\n\n{prev[-1].text}"}], timeout=180)
+res["ok"], res["final"], res["failed_step"]
 ```
 
-**`chain_conversation=True`** propaga o `conversation_id` entre os steps: em vez de N sessoes
-independentes, o agy mantem **uma** e o modelo lembra dos turnos anteriores sem voce reenviar o
-texto. So faz sentido quando todos os steps usam o mesmo modelo.
+**Saida estruturada e handoff.** `json_schema` (raiz objeto) -> `r.structured` ja parseado.
+`call_agy_handoff` preenche o contrato do `orchestrate` (`status`, `changed_files`, `tests_run`,
+`next_action`...) e alimenta o gate de `references/delegacao.md`. Sem schema possivel:
+`extract_json(texto)`.
 
-### Modo 4 - saida estruturada e handoff
+**Fan-out -> sintese.** `fanout_synthesize(pergunta, models=[...], synth_model=SYNTH_MODEL)` roda
+os modelos em paralelo e sintetiza com as respostas anonimizadas. As 5 personas e o peer-review
+sao do `llm-council`, que usa estas primitivas.
 
-```python
-from agy import call_agy_result, call_agy_handoff, HANDOFF_SCHEMA
-
-# Schema arbitrario -> r.structured vem como dict parseado.
-r = call_agy_result("Avalie o deploy de sexta.", model="Gemini 3.8 Flash (Low)",
-                    json_schema={"type": "object",
-                                 "properties": {"risco": {"type": "string"},
-                                                "acao": {"type": "string"}},
-                                 "required": ["risco", "acao"]})
-r.structured["risco"]
-
-# Contrato de handoff da skill `orchestrate`, preenchido pelo proprio agy.
-h = call_agy_handoff("Refatore o parser de datas em src/dates.py e rode os testes.",
-                     model="Claude Sonnet 4.6 (Thinking)", timeout=300,
-                     skip_permissions=True, mode="accept-edits", cwd="D:/proj")
-h.structured["next_action"]   # DONE | NEEDS_VALIDATION | NEEDS_RETRY | ESCALATE
-```
-
-`HANDOFF_SCHEMA` e o contrato do `orchestrate` (`status`, `task_summary`, `changed_files`,
-`tests_run`, `risks`, `analyst_summary`, `next_action`). Usar `--json-schema` em vez de pedir JSON
-no prompt **elimina de vez** a classe de bug que o `orchestrate` documenta: preambulo antes do
-JSON, resposta embrulhada em ```` ```json ````, e o `grep -oP '{.*}'` guloso.
-
-Quando nao der para impor schema, use `extract_json(texto)` — parser balanceado de 3 niveis
-(texto puro -> bloco markdown -> varredura com contador de profundidade que respeita strings e
-escapes).
-
-### Helper - fan-out -> sintese (base do council)
-
-```python
-from agy import fanout_synthesize
-
-verdict = fanout_synthesize(
-    "Devo lancar um curso de $297 ou um workshop de $97 primeiro?",
-    # GPT-OSS fica de fora (desatualizado); Opus reservado pro chairman, nao entra no pool.
-    models=["Gemini 3.1 Pro (High)", "Gemini 3.8 Flash (High)", "Claude Sonnet 4.6 (Thinking)"],
-    synth_model="Claude Opus 4.6 (Thinking)", max_concurrency=5, seed=42,
-)
-print(verdict.text)
-```
-
-Roda os N models em paralelo sobre o mesmo prompt, depois 1 chamada de sintese. O builder padrao
-**anonimiza/embaralha** as respostas ok como `Response A..N` (`seed` p/ reproducao). Esta skill
-**nao** implementa as 5 personas/peer-review do `llm-council` — so o motor fan-out -> reduce.
-
-### CLI - subcomandos e exit codes
+### CLI e codigos de saida
 
 ```bash
-python scripts/agy.py single   -p "..." --model "ID" [--effort high] [--conversation ID] [--json]
+python scripts/agy.py single   -p "..." [--model "ID"] [--conversation ID] [--json]
 python scripts/agy.py parallel --jobs jobs.json [--max-concurrency 4] [--retries 2]
 python scripts/agy.py pipeline --steps steps.json [--chain-conversation] [--no-fail-fast]
 python scripts/agy.py fanout   -p "..." --models "A;B;C" [--synth-model "ID"]
 python scripts/agy.py handoff  -p "..." [--model "ID"]     # stdout = so o JSON do contrato
+python scripts/agy.py image    -p "..." --dest saida.png [--ref foto.png]
 python scripts/agy.py models   [--refresh]
 ```
 
-Exit: **0** tudo ok; **1** falha (parcial em parallel/pipeline/fanout); **2** em
-`AgyError`/`FileNotFound`/`ImportError`. O `handoff` imprime stdout comecando com `{` e terminando
-com `}` — parse direto via `jq` ou Python, como manda o contrato do `orchestrate`.
+**0** ok; **1** falha (parcial em lote); **2** erro de uso/ambiente; **3** cota do agy esgotada.
 
 ---
 
-## O que cada arquivo faz
+## Imagem
 
-- `SKILL.md` - este arquivo.
-- `scripts/agy.py` - **fonte da verdade**: transporte (`_run_agy`, `_kill_tree`, `_parse_envelope`),
-  `call_agy_result`/`call_agy`, `call_agy_parallel`, `pipeline`, `fanout_synthesize`,
-  `call_agy_handoff`, `extract_json`, `known_models`, `CallResult`, `AgyError`, e a CLI.
-- `scripts/call_agy.py` - shim de retrocompatibilidade (`call_agy(prompt, timeout, model)`).
-- `tests/test_agy.py` - testes puros (offline, `SKIP_LIVE=1`) + vivos (chamam o agy de verdade).
-- `examples.md` - exemplos copiaveis.
-- `requirements.txt` - vazio no caminho padrao; `pywinpty` so para `transport="pty"`.
-- `references/environment.md` - mapa de pastas do Antigravity (`settings.json`, logs, plugins,
-  historico) e diagnostico via log quando o `CallResult` sozinho nao basta.
+So a imagem e nativa (`generate_image`); video e audio nao existem como ferramenta. Use o helper:
+
+```python
+r = generate_image("A red ceramic mug on a wooden desk, soft daylight. Portrait framing 4:5.",
+                   "saida/caneca.png", refs=["refs/produto.png"])
+r.ok, r.path, r.width, r.height, r.status   # OK | RAW_ONLY | NO_IMAGE | QUOTA_EXHAUSTED | TIMEOUT
+```
+
+- Amarra a imagem a **esta** chamada pela pasta `brain/<conversation_id>/` do envelope — duas
+  geracoes simultaneas nao trocam de arquivo. "O PNG mais novo do brain" pega o de outra geracao
+  ou a referencia enviada (`.user_uploaded`).
+- Acrescenta ao prompt o pedido de salvar em PNG; e esse PNG que ele colhe. So a saida crua (JPG
+  com timestamp) = `RAW_ONLY`, erro alto — nao entrega a crua no lugar.
+- Medido em 2026-09-30 (agy 1.2.14): 45 s, ~100 mil tokens, pedido 4:5 saiu **896x1200 (3:4)**.
+  Nao ha flag de tamanho: confira `width`/`height` e recorte localmente se a proporcao importar.
+- `NO_IMAGE` com `ok` na chamada = recusa: o motivo esta em `r.call.text`.
+
+Gabarito de prompt, imagem de referencia e tabela de falhas: `references/imagem.md`.
+
+---
+
+## Limites praticos
+
+- **Video lido** (`.mp4` no prompt) e visto em resolucao reduzida: use para entender fluxo e
+  cortes; para ler numero pequeno de tela, extraia o quadro em resolucao cheia. Com video no
+  contexto, cada passo leva 1-2 min (medido no agy 1.2.5).
+- **Video/audio gerado**: pedir nao da erro — ele monta com `ffmpeg`/`python` e descreve o
+  resultado como gerativo (medido: "video" com diferenca de 1 nivel de cinza entre o 1o e o
+  ultimo quadro). Se quer ffmpeg, chame ffmpeg.
+
+---
+
+## Delegacao sob contrato (resumo)
+
+Medido em trabalho real; detalhe, gate e casos em `references/delegacao.md`.
+
+- **Coleta bem, conclui mal.** Numeros brutos certos; interpretacao errada com aparencia de rigor.
+- **Nunca autor e juiz da mesma coisa**: ele implementa, voce escreve os testes.
+- **Gate mecanico antes do diff**: hash dos testes inalterado, `git status` so com os arquivos
+  permitidos, `HEAD` intacto, suite completa verde, lint limpo. Terceira rodada sem verde: assuma.
+- **Isolamento: detectar, nao confinar.** Investigar em copia descartavel conferida por hash;
+  implementar no repo com git como rede. Fora do repo nao ha defesa senao container/VM.
 
 ---
 
 ## Erros comuns
 
-| Sintoma | Causa provavel | Correcao |
+| Sintoma | Causa | Correcao |
 |---|---|---|
-| Script trava e nao imprime nada | chamou `agy models` em subprocess | use `known_models(refresh=True)` |
-| `INVALID_MODEL` num ID que esta no catalogo | passou `effort` com modelo que ja tem tier no nome | remova `effort`; o tier vem do ID |
-| `status: "EMPTY"` com `raw_len=0` | agy antigo com o bug #76 no print mode | `agy update` |
-| Todos os advisors do council responderam igual | agy antigo fazendo fallback silencioso | atualize; hoje isso vira `INVALID_MODEL` |
-| `structured` e `None` numa chamada com schema | modelo devolveu so prosa | `call_agy_handoff` ja cai no `extract_json`; para schema proprio, chame-o voce |
-| Timeout de 120s levou 280s | kill sem `/T` deixou netos MCP vivos | ja tratado por `_kill_tree` — se reaparecer, verifique se nao esta chamando o agy por fora do modulo |
-| Prompt chegou truncado/corrompido | montou a chamada como string de shell | passe argv como lista, `shell=False` (o modulo ja faz) |
+| Script trava sem imprimir nada | chamou `agy models` em subprocess | `known_models(refresh=True)` |
+| `INVALID_MODEL` num ID do catalogo | `effort` com modelo que ja tem tier | remova `effort` |
+| Cota do Claude some rapido | chamada sem `--model` herdou o Claude do `settings.json` | passe `model` (o modulo ja passa) |
+| `QUOTA_EXHAUSTED` | cota da conta esgotada | pare e avise o usuario |
+| `structured` e `None` com schema | modelo devolveu prosa | `extract_json`; `call_agy_handoff` ja faz |
+| Timeout de 120 s levou 280 s | kill sem `/T` | use o modulo, nao chame o agy por fora |
+| `status: EMPTY` com `raw_len=0` | agy antigo | `agy update` |
 
-Se `status`/`error` do `CallResult` nao derem a causa (ex.: falha de auth, violacao de rede), o
-proximo lugar a olhar sao os logs do proprio `agy` — nao algo que esta skill inspeciona
-automaticamente, mas util pra voce (ou o agente) ler na mao. Ver `references/environment.md`.
+Se `status`/`error` nao derem a causa, os logs do agy estao em `references/environment.md`.
 
 ---
 
-## Delegacao sob contrato (Claude Code + agy trabalhando junto)
+## Arquivos
 
-Secao empirica: tudo aqui foi **medido** em trabalho real (investigacao e correcao de um coletor
-Telegram->WhatsApp em producao, 2026-08-15), nao inferido.
+- `scripts/agy.py` - **fonte da verdade** (transporte, `call_agy*`, paralelo, pipeline, fan-out,
+  handoff, `generate_image`, catalogo, CLI).
+- `tests/test_agy.py` - puros (`SKIP_LIVE=1`, offline) + vivos (chamam o agy).
+- `examples.md` - exemplos copiaveis.
+- `references/imagem.md` - gabarito de prompt, referencia, falhas de imagem.
+- `references/delegacao.md` - evidencia da divisao de papeis, gate, isolamento.
+- `references/environment.md` - pastas do Antigravity e logs.
+- `requirements.txt` - vazio no caminho padrao; `pywinpty` so para `transport="pty"`.
 
-### O que ele acerta e o que ele erra
-
-| Tarefa | Resultado |
-|---|---|
-| Implementar `slugify` sob 9 testes prontos | **acertou** — codigo idiomatico, 9/9, sem trapaca |
-| Implementar `EchoGuard` sob 16 testes prontos | **acertou** — suite subiu 45 -> 60 |
-| Investigar causa de bug (leu o codigo) | **errou** — citou linhas inexistentes, concluiu race condition que nao existia |
-| Analisar logs e estimar latencia | **errou** — leu ausencia de log como ausencia de execucao; disse "pior caso 7,4h" onde era 20s |
-
-O padrao e consistente: **coleta bem e conclui mal.** Os numeros brutos vinham certos (57 PUSH /
-27 POLL conferiu com medicao independente); o que quebrou foi a **interpretacao**, sempre com
-aparencia de rigor — "26.807,26 segundos" e preciso e falso. Nas duas vezes a causa foi a mesma:
-**nao validar uma premissa** antes de construir em cima dela.
-
-### Divisao de papeis que funciona
-
-| Delegue ao agy | Nunca delegue |
-|---|---|
-| Implementar ate os testes passarem | **Escrever os testes** |
-| Extrair, contar, medir, tabular | **Concluir a partir dos dados** |
-| Boilerplate, conversao, scaffolding | Invariantes de seguranca e privacidade |
-| Rascunho para voce criticar | Qualquer coisa que toque producao |
-
-Regra que sustenta o resto: **ele nunca e autor e juiz da mesma coisa.** Se ele escrever os testes
-e a implementacao, um teste frouxo aprova uma implementacao frouxa e os dois parecem corretos.
-
-Peca **evidencia verificavel** (`arquivo:linha`), nunca so a conclusao — e **confira as citacoes**.
-Foi assim que os dois erros apareceram: as linhas citadas apontavam para outro codigo.
-
-### `status: TIMEOUT` NAO significa trabalho nao feito
-
-Medido: uma chamada voltou `status=TIMEOUT`, `elapsed=291s`, **texto vazio** — e mesmo assim o
-arquivo tinha sido criado e a suite inteira passava. O agy trabalha no disco; a resposta e so o
-relatorio dele.
-
-> **Nunca decida pelo `status` da chamada. Decida pelo efeito colateral verificado.**
-> Rode os testes, olhe o `git status`, confira o arquivo. Se tivesse confiado no TIMEOUT, teria
-> descartado trabalho pronto e refeito do zero.
-
-### Gate mecanico antes de qualquer revisao humana
-
-Rode isto **antes** de ler o diff. Tudo verificavel por maquina, custo ~zero:
-
-1. arquivos de teste com **hash inalterado** — ele nao mexeu no juiz;
-2. `git status --porcelain` so contem os arquivos da lista permitida;
-3. `HEAD` inalterado — nao commitou, resetou nem trocou de branch;
-4. **suite completa** verde, nao so os testes do alvo;
-5. lint/format limpos.
-
-Falhou qualquer um -> devolve sem gastar atencao. Aborte tambem na **terceira rodada sem verde**:
-assuma a tarefa e escreva voce.
-
-O gate pega trapaca e quebra. Ele **nao** pega o que o teste nao sabia perguntar — num caso real, o
-codigo entregue passou nos 16 testes e ainda assim fazia *check-then-act* sem lock num ponto onde
-duas threads concorrem. Isso so morre na revisao humana. **Gate e revisao sao camadas distintas.**
-
-### Isolamento: detectar, nao confinar
-
-`--sandbox` **nao** impede escrita fora do `cwd` — medido: com e sem a flag, ele criou arquivo em
-caminho absoluto fora do diretorio de trabalho. A flag restringe comandos de terminal, nao a
-ferramenta de escrita. Logo `cwd` e `--add-dir` sao contexto, **nao fronteira de seguranca**.
-
-- **Investigar** -> de uma **copia descartavel** e confira por hash que nada foi tocado. E a unica
-  leitura garantida. (Nas duas investigacoes ele respeitou; a garantia veio do hash, nao da promessa.)
-- **Implementar** -> rode no repo real e use **git como rede**: o gate cobre o repositorio inteiro,
-  nao so os arquivos que ele deveria tocar.
-- Fora do repo nao ha defesa real senao container/VM. Limite conhecido, nao coberto.
-- Ele sobe MCP servers proprios (`@upstash/context7-mcp`) e tem ferramental externo. Conteudo
-  malicioso dentro de um arquivo lido pode instrui-lo: a contencao e *o que ele alcanca*.
-
-### Escolha de modelo por tipo de tarefa
-
-| Tarefa | Modelo | Por que |
-|---|---|---|
-| Implementar sob testes | `Gemini 3.8 Flash (High)` | rapido; o teste e o juiz, nao precisa de thinking |
-| Extrair/medir dados de log | `Gemini 3.1 Pro (High)` | volume grande, mas **confira as conclusoes** |
-| Tarefa longa de codigo | Flash, e **fatie** | Pro High estourou 300s numa tarefa media |
-
-Suba o `timeout` junto com o tier (o modulo repassa ao `--print-timeout`, entao os relogios ficam
-alinhados). Uma implementacao nao-trivial com modelo *thinking* passa facil de 300s.
-
-Prefira `call_agy_handoff` quando o agy for executar tarefa de codigo: o contrato ja devolve
-`changed_files`, `tests_run` e `next_action` estruturados, o que alimenta o gate direto.
-
----
-
-## Geracao de midia: so imagem e nativa
-
-Secao empirica, medida em 2026-09-17 contra agy 1.2.5 (Windows local + VPS Oracle-SP).
-
-| Midia | Ferramenta nativa | Veredito |
-|---|---|---|
-| **Imagem** | `generate_image` | **existe e funciona** |
-| **Video** | nenhuma | **nao existe** |
-| **Audio / TTS** | nenhuma | **nao existe** |
-
-Duas evidencias independentes, nao a palavra do modelo:
-
-1. O manifesto de ferramentas da sessao tem 17 entradas (`run_command`, `read_url_content`,
-   `replace_file_content`, `write_to_file`, `view_file`, `grep_search`, `find_by_name`, `list_dir`,
-   `ask_question`, `schedule`, `manage_task`, `generate_image`, `invoke_subagent`,
-   `manage_subagents`, `define_subagent`, `send_message`, `search_web`) — **uma so** e de midia.
-2. O binario do agy so carrega handlers `browser`, `ephemeral` e `imagegen`. `GenerateVideo`
-   aparece la, mas como protobuf da lib vendorizada do prediction service, **nao** como tool
-   exposta. Nao confunda string no binario com capacidade.
-
-### O modo de falha: ele "gera video" com ffmpeg e relata como se fosse generativo
-
-Pedir video ou audio ao agy **nao** devolve erro. Ele cai no `run_command` e monta o arquivo com
-ferramentas locais — e depois descreve o resultado em linguagem generativa. Caso medido:
-
-- **Audio pedido** ("WAV de 3s, so ferramentas nativas") -> `python3 -c 'import wave, math, struct'`.
-  Resultado: senoide pura de 440 Hz. Zero geracao.
-- **Video pedido** ("raposa cibernetica correndo, 3s, audio sincronizado") -> `generate_image` para
-  UMA foto (essa parte e real) + `ffmpeg zoompan` para esticar em 90 frames + mux do beep.
-  Relatorio dele: *"movimentacao dinamica de camera e pulso ritmico sincronizado ao audio"*.
-  Medicao do arquivo: **diferenca maxima de 1 nivel de cinza entre o frame 0 e o 89** — video
-  totalmente estatico. O `zoompan` usava `in` em vez de `on`, bug classico do ffmpeg que congela a
-  expressao. Nem o pan falso funcionou.
-
-E o mesmo padrao de "coleta bem e conclui mal" da secao anterior, agora sobre a propria entrega.
-**Regra: para video e audio, o agy nao e backend — e um wrapper de ffmpeg que se autoavalia bem.**
-Se voce quer ffmpeg, chame ffmpeg e escreva o filtro voce. Se voce quer geracao de verdade, o agy
-nao serve.
-
-### Onde a imagem cai: a saida sai em DOIS passos
-
-Medido no brain de uma geracao real. Nao existe "o arquivo da imagem" — existem dois, e eles nao
-sao intercambiaveis.
-
-| Passo | Quem escreve | Nome | Quando |
-|---|---|---|---|
-| 1. saida crua | `generate_image` | `<ImageName>_<epoch_ms>.jpg` | na hora da tool call |
-| 2. artefato nomeado | o proprio agy, via `run_command` | o nome que o PROMPT pediu (ex.: `.png`) | minutos depois |
-
-```
-06:03  ana_brunch_fullbody_1789376606563.jpg   <- passo 1, sempre JPG, sempre com timestamp
-06:06  ana_brunch_fullbody.png                 <- passo 2, so existe se o prompt pediu
-```
-
-O passo 2 so acontece se o prompt mandar (`"Save the generated image as a PNG."`). Se o prompt nao
-pedir, existe so o JPG cru.
-
-> **Nao "corrija" um glob de `*.png` adicionando `*.jpg`.** Um pipeline que varre so `*.png` esta
-> mirando o artefato do passo 2 de proposito. Aceitar `.jpg` faz ele publicar a saida crua em
-> silencio quando o passo 2 falhar, trocando um erro alto ("nao produziu PNG") por uma entrega
-> errada. Decida qual dos dois voce quer e varra so aquele.
-
-Os dois passos caem em `~/.gemini/antigravity-cli/brain/<conversation_id>/`. O envelope JSON **nao**
-devolve o path, entao colher o arquivo e sempre uma varredura — com tres cuidados:
-
-- **Ignore `.tempmediaStorage/`** (copia de trabalho) e `reference_image*` (entrada, nao saida).
-- **O diretorio e por conversa**, com id novo a cada run: varra recursivamente a partir de `brain/`.
-- **"O mais novo do brain" tem corrida.** O mtime nao diz de QUEM e o arquivo. Com duas geracoes
-  simultaneas, a que terminar depois pode levar a imagem da outra — e as duas reportam sucesso.
-
-O jeito de amarrar o arquivo a chamada, sem depender de nome nem de mtime: **tire um snapshot dos
-diretorios de `brain/` antes da chamada e restrinja a busca aos que apareceram depois.**
-
-```python
-def brain_conversations(brain):
-    try:
-        return {d for d in os.listdir(brain) if os.path.isdir(os.path.join(brain, d))}
-    except OSError:
-        return set()
-
-before = brain_conversations(BRAIN)
-run_agy(prompt)                                  # cria uma conversa nova
-novas = brain_conversations(BRAIN) - before      # <- o escopo desta chamada
-```
-
-Se `novas` vier vazio (o agy reusou uma conversa), ai sim caia na varredura do brain inteiro — e
-saiba que naquele caminho a corrida continua de pe.
-
----
-
-## Posicionamento (vs llm-council / orchestrate)
-
-- Esta skill e o **motor de transporte reusavel**: "como chamar o agy de forma confiavel". Ela
-  **NAO** decide *quando* counciliar nem implementa personas.
-- **`llm-council`**: define a *metodologia* (5 advisors, peer-review anonimo, chairman). Quando o
-  backend for o agy, compoe as primitivas daqui: `call_agy_parallel` (fan-out + reviews) e
-  `call_agy`/`fanout_synthesize` (chairman).
-- **`orchestrate`**: roteia entre IAs (Claude planeja -> executor executa -> Claude valida). Se um
-  worker for o agy, chame `call_agy_handoff` — ele devolve o handoff JSON do contrato ja parseado,
-  sem extracao na marra.
-
-Regra pratica: "como faco o agy me devolver texto / rodar varios agy" -> esta skill. "Qual decisao
-tomar com varias opinioes" / "quem executa o que" -> `llm-council` / `orchestrate`, que por baixo
-chamam esta.
+**Posicionamento:** esta skill e o transporte. `llm-council` define a metodologia do council e usa
+`call_agy_parallel`/`call_agy`/`SYNTH_MODEL`; `orchestrate` roteia entre IAs e usa
+`call_agy_handoff`.
 
 ---
 
@@ -556,37 +288,16 @@ chamam esta.
 
 | Campo | Valor |
 |---|---|
-| **Ultima verificacao** | **2026-09-17** |
-| **Proxima revisao (a partir de)** | **2026-10-02** |
-| **Versao do agy verificada** | **1.2.5** |
-| **Linha Flash atual** | `Gemini 3.8 Flash (Low/Medium/High)` — a `(High)` e o **DEFAULT** do usuario |
-| **Linha Pro atual** | `Gemini 3.1 Pro (Low/High)` |
-| **Claude atual** | `Claude Opus 4.6 (Thinking)`, `Claude Sonnet 4.6 (Thinking)` |
-| **Outros** | `GPT-OSS 120B (Medium)` — **nao usar** (ver regra em "Catalogo de modelos") |
+| **Ultima verificacao** | **2026-09-30** |
+| **Proxima revisao (a partir de)** | **2026-10-15** |
+| **Versao do agy verificada** | **1.2.14** |
+| **Default do settings.json do usuario** | `Claude Opus 4.6 (Thinking)` (o modulo nao usa) |
 | **Total de IDs** | 14 |
 
-**Por que existe esta secao:** o Antigravity troca de versao sem avisar (a linha Flash foi 3.5 ->
-3.6 -> 3.7 -> 3.8, e o `DEFAULT_MODEL` do usuario nem sempre acompanha). O catalogo aqui e um
-espelho manual e fica velho sozinho.
-
-**Regra para o agente:** se hoje for **>= "Proxima revisao"** e a tarefa envolver escolher modelo do
-agy, revalide antes de rodar o trabalho:
-
-```bash
-python scripts/agy.py models --refresh
-```
-
-Compare com a tabela do catalogo e faca **as duas coisas** (senao divergem):
-
-1. `scripts/agy.py` -> `KNOWN_MODELS` (adicione os novos, **remova os que sumiram**),
-   `PROBE_MODEL` (Flash Low mais novo), `DEFAULT_MODEL` (releia o `settings.json` do usuario),
-   `SYNTH_MODEL` (so mude se sair um raciocinador melhor) e `CATALOG_CHECKED`.
-2. `SKILL.md` -> tabela do catalogo, a linha "Catalogo verificado em ...", e esta tabela de status.
-
-**Sem historico.** Nao acumule changelog, nao escreva "antes era 3.5, agora e 3.7". **Sobrescreva**
-a data e os valores. **Se nada mudou:** atualize so as datas (aqui e em `CATALOG_CHECKED`) e siga.
-
-> **Limite honesto:** a regra e *best-effort*, sem cron nem watcher — so dispara quando um agente
-> le esta skill depois da data. A garantia real hoje e o **proprio agy**, que rejeita modelo
-> invalido com `rc=1` e a lista dos IDs validos. Em duvida, rode `models --refresh`: custa 3.4s e
-> zero tokens.
+Se hoje for >= "Proxima revisao" e a tarefa envolver escolher modelo, rode
+`python scripts/agy.py models --refresh` (zero tokens) e atualize **os dois lados**:
+`scripts/agy.py` (`KNOWN_MODELS`, `PROBE_MODEL`, `DEFAULT_MODEL`, `IMAGE_MODEL`, `SYNTH_MODEL`,
+`CATALOG_CHECKED`) e este arquivo (catalogo, datas, versao). O teste puro
+`test_catalogo_sincronizado` falha se as datas divergirem. **Sem historico**: sobrescreva os
+valores; se nada mudou, atualize so as datas. Leia tambem o `agy changelog`: mudancas de flag
+(como a raiz objeto do `--json-schema` na 1.2.14) entram na tabela de flags.
