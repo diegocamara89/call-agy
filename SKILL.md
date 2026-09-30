@@ -297,7 +297,8 @@ Se `status`/`error` nao derem a causa, os logs do agy estao em `references/envir
 Se hoje for >= "Proxima revisao" e a tarefa envolver escolher modelo, rode
 `python scripts/agy.py models --refresh` (zero tokens) e atualize **os dois lados**:
 `scripts/agy.py` (`KNOWN_MODELS`, `PROBE_MODEL`, `DEFAULT_MODEL`, `IMAGE_MODEL`, `SYNTH_MODEL`,
-`CATALOG_CHECKED`) e este arquivo (catalogo, datas, versao). O teste puro
+`CATALOG_CHECKED`) e este arquivo (catalogo, datas, versao). Se um ID mudar, atualize tambem
+`PRO`/`SONNET`/`FLASH` em `llm-council/scripts/council.py`. O teste puro
 `test_catalogo_sincronizado` falha se as datas divergirem. **Sem historico**: sobrescreva os
 valores; se nada mudou, atualize so as datas. Leia tambem o `agy changelog`: mudancas de flag
 (como a raiz objeto do `--json-schema` na 1.2.14) entram na tabela de flags.
