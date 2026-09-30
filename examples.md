@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, r"<CAMINHO>\call-agy\scripts")   # ajuste <CAMINHO> para onde voce clonou
 from agy import (call_agy, call_agy_result, call_agy_parallel, pipeline, fanout_synthesize,
                  call_agy_handoff, extract_json, template, CallResult, AgyError,
-                 KNOWN_MODELS, HANDOFF_SCHEMA)
+                 generate_image, KNOWN_MODELS, HANDOFF_SCHEMA)
 ```
 
 > O `agy -p ... --output-format json` funciona por pipe/redirect/subprocess. **A unica excecao e o
@@ -33,8 +33,8 @@ resp = call_agy(
 print(resp)   # -> 391
 ```
 
-Sem `--model` -> usa o default de `~/.gemini/antigravity-cli/settings.json`
-(hoje `Gemini 3.7 Flash (High)`).
+Sem `model` -> o modulo usa `DEFAULT_MODEL` (`Gemini 3.8 Flash (High)`), nunca o default do
+`settings.json` (que pode ser um Claude, balde de cota menor).
 
 Diagnostico estruturado (nunca levanta por EMPTY/TIMEOUT/AUTH/INVALID_MODEL):
 
@@ -42,7 +42,7 @@ Diagnostico estruturado (nunca levanta por EMPTY/TIMEOUT/AUTH/INVALID_MODEL):
 from agy import call_agy_result
 
 r = call_agy_result("Analise X", model="Gemini 3.1 Pro (High)", timeout=300)   # tier vem do ID; sem effort
-print(r.status, r.ok, r.elapsed_s)              # OK | EMPTY | TIMEOUT | AUTH_ERROR | INVALID_MODEL
+print(r.status, r.ok, r.elapsed_s)              # OK | EMPTY | TIMEOUT | AUTH_ERROR | INVALID_MODEL | QUOTA_EXHAUSTED
 print(r.usage["total_tokens"], r.num_turns)     # custo real da chamada
 print(r.conversation_id)                        # reaproveitavel (ver exemplo 5)
 if r.ok:
@@ -92,12 +92,10 @@ CLI (com `jobs.json`):
 
 ```bash
 python scripts/agy.py parallel --jobs jobs.json --max-concurrency 4 --retries 2
-# imprime CallResult[] em JSON; exit 0 se todos ok, 1 se houve falha parcial
+# imprime CallResult[] em JSON; exit 0 se todos ok, 1 se houve falha parcial, 3 se a cota acabou
 ```
 
-> Concorrencia desta maquina: default 4, max 6. ~4x speedup em N=5, zero 429. O cap e tunado pela
-> RAM/CPU local, nao pelo backend. Para council de 5, use `max_concurrency=5`. Lotes >20 jobs:
-> processe em ondas de tamanho=cap.
+> Concorrencia e retry: ver "Como chamar" no SKILL.md.
 
 ---
 
@@ -238,7 +236,6 @@ from agy import fanout_synthesize
 
 verdict = fanout_synthesize(
     "Devo lancar um curso de $297 ou um workshop de $97 primeiro? Justifique.",
-    # GPT-OSS 120B fica de fora (desatualizado); Gemini sempre em (High); Opus reservado pro chairman.
     models=["Gemini 3.1 Pro (High)", "Gemini 3.8 Flash (High)", "Claude Sonnet 4.6 (Thinking)"],
     synth_model="Claude Opus 4.6 (Thinking)",   # chairman forte, desacoplado do pool de advisors
     max_concurrency=5, retries=2, timeout=180, seed=42,
@@ -246,35 +243,7 @@ verdict = fanout_synthesize(
 print(verdict.text)   # verdict e um CallResult
 ```
 
-Council COMPLETO (5 personas + peer-review) e composto a mao com as primitivas — isto vive no
-`llm-council`, nao nesta skill:
-
-```python
-from agy import call_agy_parallel, call_agy
-
-QUESTION = "Devo lancar um curso de $297 ou um workshop de $97 primeiro?"
-# GPT-OSS 120B fica de fora (desatualizado); Gemini sempre em (High); Opus reservado pro chairman.
-models = ["Gemini 3.1 Pro (High)", "Gemini 3.8 Flash (High)", "Claude Sonnet 4.6 (Thinking)"]
-
-# FAN-OUT
-advisors = call_agy_parallel([{"prompt": QUESTION, "model": m} for m in models],
-                             max_concurrency=5)
-answers = [a.text for a in advisors if a.ok]
-
-# PEER-REVIEW ANONIMO
-anon = "\n\n".join(f"Resposta {chr(65+i)}:\n{a}" for i, a in enumerate(answers))
-review_prompt = (QUESTION + "\n\nRespostas anonimas:\n\n" + anon +
-                 "\n\n1. Qual e a mais forte? 2. Maior ponto cego? 3. O que TODAS perderam?")
-reviews = [r.text for r in call_agy_parallel(
-    [{"prompt": review_prompt, "model": m} for m in models], max_concurrency=5) if r.ok]
-
-# CHAIRMAN
-chairman = call_agy(
-    "Sintetize um veredito final.\n\nPERGUNTA:\n" + QUESTION +
-    "\n\nRESPOSTAS:\n" + anon + "\n\nREVISOES:\n" + "\n\n".join(reviews),
-    model="Claude Opus 4.6 (Thinking)", timeout=300)
-print(chairman)
-```
+As 5 personas com peer-review anonimo vivem no `llm-council`, que usa estas primitivas.
 
 ---
 
@@ -284,7 +253,7 @@ print(chairman)
 from agy import known_models
 
 known_models()                # tupla estatica KNOWN_MODELS (instantaneo)
-known_models(refresh=True)    # pergunta ao agy: ~3.4s, ZERO tokens
+known_models(refresh=True)    # pergunta ao agy: ~4 s, ZERO tokens
 ```
 
 ```bash
@@ -311,19 +280,31 @@ python tests/test_agy.py                # + os vivos (chamam o agy, alguns minut
 
 ---
 
-## 9. Retrocompatibilidade (interface antiga)
-
-O codigo antigo continua funcionando via `scripts/call_agy.py` (ordem antiga dos kwargs
-`prompt, timeout, model`, permissivo / sem validacao de modelo):
+## 9. Imagem
 
 ```python
-from call_agy import call_agy      # assinatura antiga: (prompt, timeout, model)
-print(call_agy("Oi", 90, "Gemini 3.8 Flash (Low)"))
+from agy import generate_image
+
+prompt = """Generate ONE photorealistic image.
+SCENE: kitchen, morning
+SUBJECT: a red ceramic mug
+LIGHT: soft daylight from the left
+FRAMING: portrait 4:5"""
+
+r = generate_image(
+    prompt,
+    "saida/caneca.png",
+    refs=["refs/caneca_frente.png"],     # opcional: imagem de referencia (entrada)
+)
+if r.ok:
+    print(r.path, r.width, r.height)     # proporcao nao e garantida: confira e recorte se precisar
+elif r.status == "QUOTA_EXHAUSTED":
+    ...                                  # pare o lote e avise o usuario
+else:
+    print(r.status, r.error)             # NO_IMAGE = recusa (motivo em r.call.text); RAW_ONLY = sem PNG
 ```
 
 ```bash
-python scripts/call_agy.py "Oi" --model "Gemini 3.8 Flash (Low)" --timeout 90
+python scripts/agy.py image -p "A red ceramic mug on a wooden desk" --dest saida/caneca.png
+# exit 0 ok, 1 falha, 3 cota esgotada
 ```
-
-Ele perde os campos novos do envelope (`conversation_id`, `usage`, `structured`) — codigo novo deve
-importar de `agy.py`.
