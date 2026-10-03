@@ -46,6 +46,7 @@ import random
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -412,12 +413,15 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         pass
 
 
-def _run_agy(argv: list[str], timeout: int, cwd: str, env: dict | None) -> tuple[int | None, str, str, bool]:
+def _run_agy(argv: list[str], timeout: int, cwd: str, env: dict | None,
+             stdout_path: Path | None = None) -> tuple[int | None, str, str, bool]:
     """
     Executa o agy e devolve (returncode, stdout, stderr, timed_out).
 
     Popen + CREATE_NEW_PROCESS_GROUP (Windows) para que o kill da arvore alcance os netos.
     Nunca levanta TimeoutExpired: sinaliza via timed_out e devolve o que ja saiu dos pipes.
+    Com stdout_path, a saida vai direto para o arquivo (lido ao vivo por quem acompanha) e e
+    relida no fim.
     """
     creationflags = 0
     if os.name == "nt":
@@ -427,9 +431,10 @@ def _run_agy(argv: list[str], timeout: int, cwd: str, env: dict | None) -> tuple
     if env:
         full_env = {**os.environ, **env}
 
+    out_file = open(stdout_path, "w", encoding="utf-8") if stdout_path else None
     proc = subprocess.Popen(
         argv,
-        stdout=subprocess.PIPE,
+        stdout=out_file or subprocess.PIPE,
         stderr=subprocess.PIPE,
         stdin=subprocess.DEVNULL,   # agy nunca deve esperar input em modo print
         text=True,
@@ -439,16 +444,38 @@ def _run_agy(argv: list[str], timeout: int, cwd: str, env: dict | None) -> tuple
         env=full_env,
         creationflags=creationflags,
     )
+    def _out(out: str | None) -> str:
+        if out_file is None:
+            return out or ""
+        out_file.close()
+        return stdout_path.read_text(encoding="utf-8", errors="replace")
+
     try:
         out, err = proc.communicate(timeout=timeout)
-        return proc.returncode, out or "", err or "", False
+        return proc.returncode, _out(out), err or "", False
     except subprocess.TimeoutExpired:
         _kill_tree(proc)
         try:
             out, err = proc.communicate(timeout=10)
         except Exception:
             out, err = "", ""
-        return proc.returncode, out or "", err or "", True
+        return proc.returncode, _out(out), err or "", True
+
+
+def _stream_to_envelope(stdout: str) -> str:
+    """
+    Converte a saida stream-json (um evento por linha) no envelope do modo json: o campo
+    `result` do evento final. Sem evento final, devolve o texto como veio (o chamador ja trata
+    envelope ausente).
+    """
+    for line in reversed(stdout.splitlines()):
+        try:
+            ev = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(ev, dict) and ev.get("event") == "result" and isinstance(ev.get("result"), dict):
+            return json.dumps(ev["result"], ensure_ascii=False)
+    return stdout
 
 
 def _parse_envelope(stdout: str) -> dict | None:
@@ -673,7 +700,7 @@ def call_agy_result(
     tmp_schema: Path | None = None
     if json_schema is not None:
         if isinstance(json_schema, dict):
-            import tempfile  # local: so este caminho precisa
+
 
             fd, name = tempfile.mkstemp(suffix=".json", prefix="agy_schema_")
             os.close(fd)
@@ -690,9 +717,29 @@ def call_agy_result(
         mode=mode, add_dirs=add_dirs, agent=agent, print_timeout=timeout,
     )
 
+    # AGY_EVENTS_DIR (opcional): grava os passos do agy ao vivo, um arquivo por chamada, para um
+    # painel acompanhar. O resultado devolvido e o mesmo do modo json.
+    events_dir = os.environ.get("AGY_EVENTS_DIR")
+    events_path = None
+    if events_dir:
+        try:
+            Path(events_dir).mkdir(parents=True, exist_ok=True)
+            fd, name = tempfile.mkstemp(prefix="agy-", suffix=".jsonl", dir=events_dir)
+            os.close(fd)
+            events_path = Path(name)
+            argv[argv.index("--output-format") + 1] = "stream-json"
+        except OSError as exc:
+            _LOG.warning("AGY_EVENTS_DIR inutilizavel (%s): seguindo sem eventos", exc)
+            events_path = None
+
     start = time.monotonic()
     try:
-        rc, stdout, stderr, timed_out = _run_agy(argv, timeout, workdir, env)
+        if events_path is None:
+            rc, stdout, stderr, timed_out = _run_agy(argv, timeout, workdir, env)
+        else:
+            rc, stdout, stderr, timed_out = _run_agy(argv, timeout, workdir, env, events_path)
+        if events_path is not None:
+            stdout = _stream_to_envelope(stdout)
     except FileNotFoundError:
         raise
     except Exception as exc:
