@@ -78,9 +78,9 @@ Existem no agy e o modulo ainda nao expoe: `--project`/`--new-project`, `--log-f
 
 ## Catalogo de modelos
 
-**Catalogo verificado em 2026-09-30** (agy 1.2.14, 14 IDs). Estas regras valem para toda a skill:
+**Catalogo verificado em 2026-11-17** (16 IDs: entraram Gemini 4 Hydrogen, Carbon e Argon; sairam Gemini 3.1 Pro e os Flash 3.7/3.6 em 11/2026). Estas regras valem para toda a skill:
 
-- **Modelo padrao.** Sem `model`, o modulo usa `DEFAULT_MODEL = Gemini 3.8 Flash (High)`. Ele
+- **Modelo padrao.** Sem `model`, o modulo usa `DEFAULT_MODEL = Gemini 4 Hydrogen (High)` (avaliacao de 17/11/2026: nota igual ou melhor que o Flash 3.8 High em 1/6 do tempo). Ele
   nunca omite `--model`: o agy cru usaria o default do `settings.json` do usuario, que em
   2026-09-30 era **Claude Opus 4.6 (Thinking)** — o balde de cota menor. Script que chama `agy -p`
   direto, fora do modulo, precisa passar `--model` explicito pelo mesmo motivo.
@@ -89,17 +89,19 @@ Existem no agy e o modulo ainda nao expoe: `--project`/`--new-project`, `--log-f
 - **Nunca `GPT-OSS 120B`** — desatualizado; listado so por completude.
 - **Nunca `effort` com modelo que ja tem tier no nome**: o agy responde `INVALID_MODEL`. Escolha o
   tier trocando o ID.
-- **Council**: familias diferentes (`Gemini 3.1 Pro (High)`, `Gemini 3.8 Flash (High)`,
-  `Claude Sonnet 4.6 (Thinking)`); 3.8 + 3.7 + 3.6 Flash sao o mesmo modelo, nao opinioes.
+- **Council**: familias diferentes (`Gemini 3.8 Flash (High)`, `Claude Sonnet 4.6 (Thinking)`,
+  `Claude Opus 4.6 (Thinking)`); o Gemini 3.1 Pro saiu do catalogo em 2026-11.
   Chairman: `SYNTH_MODEL = Claude Opus 4.6 (Thinking)`.
 
 | ID literal (`--model "..."`) | Uso |
 |---|---|
-| `Gemini 3.8 Flash (High)` | **DEFAULT_MODEL**; implementar sob teste; imagem (`IMAGE_MODEL`) |
+| `Gemini 4 Hydrogen (High)` | **DEFAULT_MODEL** e `IMAGE_MODEL`; busca na web, leitura, extracao, implementar sob teste (21/21 rodadas de busca perfeitas). Video e audio: sem ferramenta nativa (testado 17/11/2026: responde NO_VIDEO_TOOL / NO_AUDIO_TOOL) |
+| `Gemini 4 Carbon (High)` | **evitar**: nota 1,00 nas baterias, mas 3 a 4x mais lento e estourou 300 s tres vezes seguidas num conselho real (17/11/2026) |
+| `Gemini 4 Argon (High)` | **nao usar**: errou versoes em buscas na web (nota 0,91/0,93) |
+| `Gemini 4 Hydrogen/Carbon/Argon` Low, Medium, XHigh | nao testados |
+| `Gemini 3.8 Flash (High)` | padrao antigo; tambem gera imagem |
 | `Gemini 3.8 Flash (Medium)` | triagem |
 | `Gemini 3.8 Flash (Low)` | probes (**PROBE_MODEL**) |
-| `Gemini 3.7 Flash (High/Medium/Low)`, `Gemini 3.6 Flash (High/Medium/Low)` | legado |
-| `Gemini 3.1 Pro (High)` / `(Low)` | analise pesada / pontual |
 | `Claude Sonnet 4.6 (Thinking)` | raciocinio, review (balde Claude) |
 | `Claude Opus 4.6 (Thinking)` | chairman (**SYNTH_MODEL**, balde Claude) |
 | `GPT-OSS 120B (Medium)` | nao usar |
@@ -227,6 +229,33 @@ Gabarito de prompt, imagem de referencia e tabela de falhas: `references/imagem.
 
 ---
 
+## Busca na web (a causa de quase toda falha de pesquisa)
+
+Medido em 2026-11-10 nos eventos do painel-vivo: prompt de pesquisa aberta ("liste ate 12 canais,
+cite URL de cada dado, se nao achar escreva 'nao encontrado'") faz o agy repetir `search_web` sem
+parar: 30 a 138 buscas em 600 s, **nenhuma resposta final**; o timeout mata tudo e o resultado
+volta como `TIMEOUT`/`ERROR`. Os mesmos jobs com pedido mais estreito fecharam em ~65 s (12 a 28
+passos). Com teto de 12 buscas no prompt, o prompt que nunca fechava terminou em 159 s, `OK`,
+exatamente 12 buscas.
+
+**Regra: toda pesquisa na web passa `max_searches=12`** (job: `"max_searches": 12`; CLI:
+`--max-searches 12` em `single` e em `parallel`; no `parallel` o job com `max_searches` proprio
+prevalece). O modulo antepõe a regra de orcamento ao prompt. Alem disso, divida o tema
+em jobs estreitos (1 pergunta por job) em vez de um prompt com 4 entregas. Nao adianta subir o
+timeout nem aumentar `--retries`: a nova tentativa refaz o laco do zero.
+
+**Segundo modo de falha (medido nas execucoes de 10/11 do radar): o teto de buscas nao basta.**
+Jobs com 4 a 16 buscas tambem morreram sem resposta, porque faziam 9 a 22 `run_command` (python
+abrindo URL, resolvendo links `grounding-api-redirect`) em passos de ~5 s. Pedir "a URL da materia,
+nao da busca" empurra o agy para esse laco. Por isso existe o **resgate**: ao estourar o tempo (ou o
+agy morrer sozinho, `rc=1073807364`), o modulo retoma a MESMA conversa por ate 150 s e pede a
+resposta com o que ja foi coletado (`CallResult.rescued=True`). Medido: timeout de 60 s, resgate
+fechou em 73 s no total. A resposta resgatada traz so o que deu tempo de achar ("nao encontrado" no
+resto): confira antes de usar. Desligue com `rescue=False`. Alem disso, o modulo agora roda sempre em
+stream-json (o `conversation_id` so existe no evento `init` dele).
+
+---
+
 ## Limites praticos
 
 - **Video lido** (`.mp4` no prompt) e visto em resolucao reduzida: use para entender fluxo e
@@ -288,11 +317,11 @@ Se `status`/`error` nao derem a causa, os logs do agy estao em `references/envir
 
 | Campo | Valor |
 |---|---|
-| **Ultima verificacao** | **2026-09-30** |
-| **Proxima revisao (a partir de)** | **2026-10-15** |
-| **Versao do agy verificada** | **1.2.14** |
+| **Ultima verificacao** | **2026-11-10** |
+| **Proxima revisao (a partir de)** | **2026-11-25** |
+| **Versao do agy verificada** | **1.4.12** |
 | **Default do settings.json do usuario** | `Claude Opus 4.6 (Thinking)` (o modulo nao usa) |
-| **Total de IDs** | 14 |
+| **Total de IDs** | 6 |
 
 Se hoje for >= "Proxima revisao" e a tarefa envolver escolher modelo, rode
 `python scripts/agy.py models --refresh` (zero tokens) e atualize **os dois lados**:

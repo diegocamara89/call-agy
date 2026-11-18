@@ -163,10 +163,51 @@ def _fake_run(stdout: str, stderr: str = "", rc: int = 0):
     """Troca o transporte por um falso: devolve a saida dada, sem chamar o agy."""
     chamadas: list = []
 
-    def run(argv, timeout, cwd, env):
+    def run(argv, timeout, cwd, env, saida=None):
         chamadas.append(argv)
         return rc, stdout, stderr, False
     return run, chamadas
+
+
+def test_resgate() -> None:
+    print("\n[resgate: estourou o tempo -> retoma a conversa e pede o fechamento]")
+    orig_run, orig_find = _agy._run_agy, _agy._find_agy
+    _agy._find_agy = lambda: "agy.exe"
+    init = '{"event":"init","conversation_id":"conv-xyz","init":{}}\n{"event":"step_update","step_update":{}}\n'
+    ok = '{"status":"SUCCESS","response":"fechado com o que havia","conversation_id":"conv-xyz"}'
+    try:
+        chamadas: list = []
+
+        def run(argv, timeout, cwd, env, saida=None):
+            chamadas.append(argv)
+            if "--conversation" in argv:
+                return 0, ok, "", False
+            return 1, init, "", True      # 1a chamada: estourou, sem evento result
+        _agy._run_agy = run
+        r = call_agy_result("pesquise", model=PROBE_MODEL, timeout=60)
+        check("timeout com conversa conhecida vira OK resgatado", r.ok and r.rescued, f"{r.status} {r.error}")
+        check("resgate usa --conversation da 1a chamada",
+              chamadas[1][chamadas[1].index("--conversation") + 1] == "conv-xyz")
+        check("resgate pede para parar", any(_agy.RESCUE_PROMPT == a for a in chamadas[1]), str(chamadas[1]))
+        check("so 2 chamadas (o resgate nao se resgata)", len(chamadas) == 2, str(len(chamadas)))
+
+        chamadas.clear()
+        _agy._run_agy = lambda argv, timeout, cwd, env, saida=None: (chamadas.append(argv) or (1, init, "", True))
+        r = call_agy_result("pesquise", model=PROBE_MODEL, timeout=60, rescue=False)
+        check("rescue=False: continua TIMEOUT", r.status == "TIMEOUT" and len(chamadas) == 1, r.status)
+
+        chamadas.clear()
+        _agy._run_agy = lambda argv, timeout, cwd, env, saida=None: (chamadas.append(argv) or (1, "sem init", "", True))
+        r = call_agy_result("pesquise", model=PROBE_MODEL, timeout=60)
+        check("sem conversation_id no stream: TIMEOUT normal", r.status == "TIMEOUT" and len(chamadas) == 1, r.status)
+
+        chamadas.clear()
+        _agy._run_agy = lambda argv, timeout, cwd, env, saida=None: (
+            chamadas.append(argv) or ((0, ok, "", False) if "--conversation" in argv else (1073807364, init, "", False)))
+        r = call_agy_result("pesquise", model=PROBE_MODEL, timeout=60)
+        check("agy morreu sozinho (rc 1073807364, sem envelope): tambem resgata", r.ok and r.rescued, f"{r.status} {r.error}")
+    finally:
+        _agy._run_agy, _agy._find_agy = orig_run, orig_find
 
 
 def test_default_model_e_cota() -> None:
@@ -266,7 +307,7 @@ def test_cota_refinada() -> None:
 
         longa = '{"status":"ERROR","error":"Individual quota reached. Resets in 3h5m."}'
 
-        def run_misto(argv, timeout, cwd, env):
+        def run_misto(argv, timeout, cwd, env, saida=None):
             modelo = argv[argv.index("--model") + 1]
             if modelo.startswith("Gemini"):
                 return 1, longa, "", False
@@ -435,6 +476,7 @@ def main() -> int:
     test_pipeline_validation()
     test_transport_validation()
     test_default_model_e_cota()
+    test_resgate()
     test_imagem_puro()
     test_cota_refinada()
     test_exemplos_compilam()

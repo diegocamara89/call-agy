@@ -67,17 +67,19 @@ from typing import Any, Callable
 #
 # Fonte da verdade = known_models(refresh=True). Ver "Manutencao do catalogo" no SKILL.md.
 KNOWN_MODELS: tuple[str, ...] = (
+    "Gemini 4 Hydrogen (High)",
+    "Gemini 4 Hydrogen (XHigh)",
+    "Gemini 4 Hydrogen (Medium)",
+    "Gemini 4 Hydrogen (Low)",
+    "Gemini 4 Carbon (High)",
+    "Gemini 4 Carbon (Medium)",
+    "Gemini 4 Carbon (Low)",
+    "Gemini 4 Argon (High)",
+    "Gemini 4 Argon (Medium)",
+    "Gemini 4 Argon (Low)",
     "Gemini 3.8 Flash (High)",
     "Gemini 3.8 Flash (Medium)",
     "Gemini 3.8 Flash (Low)",
-    "Gemini 3.7 Flash (High)",
-    "Gemini 3.7 Flash (Medium)",
-    "Gemini 3.7 Flash (Low)",
-    "Gemini 3.6 Flash (High)",
-    "Gemini 3.6 Flash (Medium)",
-    "Gemini 3.6 Flash (Low)",
-    "Gemini 3.1 Pro (High)",
-    "Gemini 3.1 Pro (Low)",
     "Claude Sonnet 4.6 (Thinking)",
     "Claude Opus 4.6 (Thinking)",
     "GPT-OSS 120B (Medium)",
@@ -85,22 +87,41 @@ KNOWN_MODELS: tuple[str, ...] = (
 
 # Data (ISO) da ultima verificacao do catalogo, e a janela de revalidacao.
 # Sem historico: sobrescreva a data a cada checagem, mude ou nao a lista.
-CATALOG_CHECKED = "2026-09-30"
+CATALOG_CHECKED = "2026-11-17"
 CATALOG_RECHECK_DAYS = 15
 
 # Modelo usado quando quem chama NAO passa `model`. O agy cru usaria o default do settings.json
 # (~/.gemini/antigravity-cli/settings.json), que e do usuario e pode ser um Claude (em 2026-09-30
 # era "Claude Opus 4.6 (Thinking)") — o balde de cota menor, que esgota. Por isso o modulo nunca
-# omite --model: sem `model`, vai este Flash (High), do balde Gemini.
-DEFAULT_MODEL = "Gemini 3.8 Flash (High)"
+# omite --model: sem `model`, vai este Hydrogen (High), do balde Gemini. Trocado do Flash 3.8 High em
+# 2026-11-17: avaliacao-vibe, 28 tarefas, nota 1,00/0,98 contra 1,00/0,97, em 1/6 do tempo (576 s x 3541 s).
+DEFAULT_MODEL = "Gemini 4 Hydrogen (High)"
 # Chairman/sintese: tier de raciocinio, NAO segue o default do settings.json de proposito
 # (rebaixar a sintese para um Flash degradaria o fanout/council).
 SYNTH_MODEL = "Claude Opus 4.6 (Thinking)"
 # Modelo rapido/terse para probes e triagem.
 PROBE_MODEL = "Gemini 3.8 Flash (Low)"
 
+# Busca na web: sem teto o agy entra em laco de search_web (medido em 2026-11-10: 30 a 138
+# buscas em 600 s, nenhuma resposta final; com teto de 12, o mesmo prompt fechou em 159 s).
+SEARCH_BUDGET_TEMPLATE = (
+    "REGRA DE ORCAMENTO (obrigatoria): faca no maximo {n} buscas na web no total. "
+    "Ao chegar na {n}a busca, ou antes se ja tiver o suficiente, PARE de pesquisar e escreva "
+    "a resposta final com o que coletou; o que faltar, escreva 'nao encontrado'. "
+    "Nunca termine sem a resposta final.\n\n"
+)
+
+# RESGATE (medido em 2026-11-10 nos eventos do painel-vivo): job de pesquisa estoura o tempo no meio
+# de buscas e de `run_command` (python abrindo URL), sem nunca escrever a resposta; matar jogava fora
+# 5 a 9 minutos de trabalho. Ao estourar, retoma a MESMA conversa e pede a resposta com o que ja foi
+# coletado. A conversa e achada no evento `init` do stream-json (o modulo agora usa stream-json sempre).
+RESCUE_TIMEOUT = 150
+RESCUE_PROMPT = ("O tempo acabou. PARE de pesquisar e de executar comandos agora. Escreva a resposta "
+                 "final completa, no formato pedido, SO com o que ja coletou; o que faltar, marque "
+                 "'nao encontrado'. Nao faca mais nenhuma busca nem comando.")
+
 DEFAULT_TIMEOUT = 180
-FLASH_TIMEOUT = 90    # tier rapido (Flash Low/Medium)
+FLASH_TIMEOUT = 90  # tier rapido (Flash Low/Medium)
 THINK_TIMEOUT = 300   # tier lento (Pro High, Sonnet/Opus Thinking)
 
 # ID sentinela usado so para arrancar do agy a lista oficial de modelos (ele responde rc=1 com
@@ -204,6 +225,7 @@ class CallResult:
     num_turns: int = 0
     agy_duration_s: float = 0.0
     transport: str = "json"  # "json" | "pty"
+    rescued: bool = False    # True: estourou o tempo e a resposta veio do RESGATE (conversa retomada)
 
 
 # --------------------------------------------------------------------------- Localizacao
@@ -462,6 +484,18 @@ def _run_agy(argv: list[str], timeout: int, cwd: str, env: dict | None,
         return proc.returncode, _out(out), err or "", True
 
 
+def _stream_conversation_id(stdout: str) -> str | None:
+    """conversation_id do evento `init` (primeira linha do stream-json), ou None."""
+    for line in stdout.splitlines()[:5]:
+        try:
+            ev = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(ev, dict) and ev.get("conversation_id"):
+            return str(ev["conversation_id"])
+    return None
+
+
 def _stream_to_envelope(stdout: str) -> str:
     """
     Converte a saida stream-json (um evento por linha) no envelope do modo json: o campo
@@ -637,6 +671,8 @@ def call_agy_result(
     agent: str | None = None,
     transport: str = "auto",
     env: dict | None = None,
+    max_searches: int | None = None,
+    rescue: bool = True,
 ) -> CallResult:
     """
     Superficie ESTRUTURADA (usada por parallel/pipeline). NUNCA levanta por EMPTY/TIMEOUT/AUTH/
@@ -664,6 +700,11 @@ def call_agy_result(
         agent: nome do agente (--agent).
         transport: "auto" (json, com auto-heal p/ pty em 0 bytes) | "json" | "pty".
         env: variaveis extras de ambiente (mescladas sobre os.environ).
+        max_searches: PROMPT DE BUSCA NA WEB: teto de buscas (12 e um bom valor). Obrigatorio na
+            pratica para pesquisa aberta; sem ele o agy pode buscar sem parar ate o timeout.
+        rescue: se estourar o tempo (ou o agy morrer sem resposta) e a conversa for conhecida,
+            retoma a mesma conversa por ate RESCUE_TIMEOUT s pedindo a resposta com o que ja foi
+            coletado. CallResult.rescued=True nesse caso. Soma ate RESCUE_TIMEOUT ao tempo total.
 
     Returns:
         CallResult com status/ok/text/structured/usage/conversation_id para diagnostico.
@@ -687,6 +728,9 @@ def call_agy_result(
             "Rode known_models(refresh=True) se o catalogo estiver velho, ou passe "
             "validate_model=False para deixar o proprio agy validar."
         )
+
+    if max_searches:
+        prompt = SEARCH_BUDGET_TEMPLATE.format(n=int(max_searches)) + prompt
 
     workdir = cwd if cwd is not None else str(Path.home())
 
@@ -719,26 +763,32 @@ def call_agy_result(
 
     # AGY_EVENTS_DIR (opcional): grava os passos do agy ao vivo, um arquivo por chamada, para um
     # painel acompanhar. O resultado devolvido e o mesmo do modo json.
+    # Sempre stream-json: so ele traz o conversation_id no evento `init`, que o RESGATE precisa
+    # quando a chamada estoura o tempo. Com AGY_EVENTS_DIR os eventos ficam la, para o painel; sem
+    # ela, vao para um arquivo temporario apagado no fim.
     events_dir = os.environ.get("AGY_EVENTS_DIR")
     events_path = None
-    if events_dir:
-        try:
+    events_tmp = False
+    try:
+        if events_dir:
             Path(events_dir).mkdir(parents=True, exist_ok=True)
-            fd, name = tempfile.mkstemp(prefix="agy-", suffix=".jsonl", dir=events_dir)
-            os.close(fd)
-            events_path = Path(name)
-            argv[argv.index("--output-format") + 1] = "stream-json"
-        except OSError as exc:
-            _LOG.warning("AGY_EVENTS_DIR inutilizavel (%s): seguindo sem eventos", exc)
-            events_path = None
+        fd, name = tempfile.mkstemp(prefix="agy-", suffix=".jsonl", dir=events_dir or None)
+        os.close(fd)
+        events_path = Path(name)
+        events_tmp = not events_dir
+        argv[argv.index("--output-format") + 1] = "stream-json"
+    except OSError as exc:
+        _LOG.warning("arquivo de eventos inutilizavel (%s): seguindo em modo json, sem resgate", exc)
+        events_path = None
 
     start = time.monotonic()
+    raw_stream = ""
     try:
         if events_path is None:
             rc, stdout, stderr, timed_out = _run_agy(argv, timeout, workdir, env)
         else:
             rc, stdout, stderr, timed_out = _run_agy(argv, timeout, workdir, env, events_path)
-        if events_path is not None:
+            raw_stream = stdout
             stdout = _stream_to_envelope(stdout)
     except FileNotFoundError:
         raise
@@ -750,6 +800,11 @@ def call_agy_result(
                 tmp_schema.unlink()
             except OSError:
                 pass
+        if events_tmp and events_path is not None:
+            try:
+                events_path.unlink()
+            except OSError:
+                pass
 
     dur = time.monotonic() - start
     raw_len = len(stdout)
@@ -759,12 +814,37 @@ def call_agy_result(
     def _mk(ok, text, status, error, **kw) -> CallResult:
         return CallResult(ok, text, model, status, error, dur, 1, raw_len, **kw)
 
+    def _rescue(motivo: str) -> CallResult | None:
+        """Retoma a conversa que ficou sem resposta e pede o fechamento. None se nao der."""
+        conv = _stream_conversation_id(raw_stream)
+        if not (rescue and conv):
+            return None
+        _LOG.warning("agy sem resposta (%s): resgatando a conversa %s", motivo, conv)
+        r2 = call_agy_result(RESCUE_PROMPT, model=model, timeout=RESCUE_TIMEOUT, validate_model=False,
+                             cwd=workdir, conversation=conv, json_schema=json_schema,
+                             skip_permissions=skip_permissions, sandbox=sandbox, mode=mode,
+                             add_dirs=add_dirs, agent=agent, transport=transport, env=env,
+                             rescue=False)
+        if not r2.ok:
+            return None
+        r2.rescued = True
+        r2.elapsed_s += dur
+        return r2
+
     if timed_out:
+        r2 = _rescue(f"timeout de {timeout}s")
+        if r2 is not None:
+            return r2
         return _mk(False, "", "TIMEOUT",
                    f"Timeout de {timeout}s (arvore de processos encerrada com kill /T).")
 
     # Envelope ausente -> o agy nao chegou a produzir JSON.
     if env_json is None:
+        # Morreu por conta propria (ex.: --print-timeout do agy, rc=1073807364) com trabalho feito.
+        if raw_len > 0 and not _is_quota_exhausted(stderr_clean, stdout):
+            r2 = _rescue(f"sem envelope, rc={rc}")
+            if r2 is not None:
+                return r2
         if raw_len == 0 and transport == "auto":
             # Auto-heal: agy antigo com o bug TTY #76 no print mode. Tenta o ConPTY uma vez.
             _LOG.warning(
@@ -862,6 +942,7 @@ def call_agy(
 _JOB_KEYS = (
     "model", "timeout", "effort", "conversation", "continue_last", "json_schema",
     "skip_permissions", "sandbox", "mode", "add_dirs", "agent", "transport", "cwd", "env",
+    "max_searches",
 )
 
 
@@ -1214,7 +1295,7 @@ BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
 _BRAIN_SKIP = {".tempmediastorage", ".user_uploaded", ".system_generated", "scratch"}
 _IMG_EXT = (".png", ".jpg", ".jpeg", ".webp")
 # Quem escreve o prompt da tool generate_image; a imagem vem do gerador do proprio agy.
-IMAGE_MODEL = "Gemini 3.8 Flash (High)"
+IMAGE_MODEL = "Gemini 4 Hydrogen (High)"  # 2026-11-17: 1264x848 em 77 s, igual ao Flash 3.8 High (74 s)
 
 
 @dataclass
@@ -1460,7 +1541,8 @@ def _rc(results) -> int:
 
 def _cmd_single(args: argparse.Namespace) -> int:
     r = call_agy_result(args.prompt, model=args.model, timeout=args.timeout,
-                        validate_model=not args.no_validate, **_common_call_kwargs(args))
+                        validate_model=not args.no_validate, max_searches=args.max_searches,
+                        **_common_call_kwargs(args))
     if args.json:
         print(_serialize(r))
     else:
@@ -1472,6 +1554,10 @@ def _cmd_single(args: argparse.Namespace) -> int:
 
 def _cmd_parallel(args: argparse.Namespace) -> int:
     jobs = json.loads(Path(args.jobs).read_text(encoding="utf-8"))
+    if args.max_searches:
+        jobs = [{"max_searches": args.max_searches, **j} if isinstance(j, dict)
+                else {"prompt": j[0], "model": j[1] if len(j) > 1 else None,
+                      "max_searches": args.max_searches} for j in jobs]
     results = call_agy_parallel(jobs, max_concurrency=args.max_concurrency,
                                 retries=args.retries, timeout=args.timeout)
     print(_serialize(results))
@@ -1541,6 +1627,8 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--transport", default="auto", choices=["auto", "json", "pty"])
     sp.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     sp.add_argument("--no-validate", action="store_true", help="Nao validar o ID do modelo.")
+    sp.add_argument("--max-searches", type=int, default=None,
+                    help="Prompt de BUSCA NA WEB: teto de buscas (use 12). Evita o laco sem fim.")
     sp.add_argument("--json", action="store_true", help="Imprime o CallResult completo.")
     sp.set_defaults(func=_cmd_single)
 
@@ -1549,6 +1637,8 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--max-concurrency", type=int, default=4)
     pp.add_argument("--retries", type=int, default=2)
     pp.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    pp.add_argument("--max-searches", type=int, default=None,
+                    help="Teto de buscas na web aplicado a todo job sem max_searches proprio (use 12).")
     pp.set_defaults(func=_cmd_parallel)
 
     cp = sub.add_parser("pipeline", help="Encadeia passos (JSON; so 'prompt'/template via CLI).")
