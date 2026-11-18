@@ -1,6 +1,6 @@
 ---
 name: call-agy
-description: Use para delegar trabalho ao agy (Antigravity CLI do Google, modelos Gemini e Claude pela conta Google) a partir de codigo - segunda opiniao, council ou verificacao cruzada com outra familia de modelo, lote grande de leitura ou extracao que gastaria cota do Claude, gerar imagem, ver video. Tambem quando o agy voltar vazio, travar, esgotar a cota ou parecer usar o modelo errado. TRIGGERS - chamar agy, delegar ao agy, segunda opiniao, verificacao cruzada, council com agy, agy em paralelo, poupar cota do Claude, gerar imagem, agy gera imagem, agy gera video, ver video com agy, agy vazio, agy travou, cota do agy, modelos do agy.
+description: Use para gerar IMAGEM com o agy (Antigravity CLI do Google, Gemini 3.8 Flash) a partir de codigo, e quando o agy voltar vazio, travar, esgotar a cota ou parecer usar o modelo errado. A assinatura do Gemini foi cancelada em 18/11/2026, entao o agy so serve de ferramenta de imagem (reserva Codex); texto, busca na web, lote de leitura, segunda opiniao e council vao para o vibe e o Codex. TRIGGERS - gerar imagem, agy gera imagem, imagem com o agy, agy vazio, agy travou, cota do agy, modelos do agy.
 ---
 
 # call-agy - delegar ao agy (Antigravity CLI) de forma confiavel
@@ -24,14 +24,12 @@ esgotada e outra coisa: pare e avise o usuario (ver "Cota").**
 
 | Situacao | Quem faz | Por que |
 |---|---|---|
-| Gerar imagem | agy (`generate_image`) | so ele tem a ferramenta nativa |
-| Ver video (entender fluxo, cortes) | agy | le `.mp4`; numero pequeno de tela, leia em quadro de resolucao cheia |
-| Segunda opiniao, council, verificacao cruzada | agy | outra familia de modelo = opiniao independente |
-| Lote grande de leitura, extracao, contagem | agy | poupa a cota do Claude; peca `arquivo:linha` e confira |
-| Implementar sob testes ja escritos | agy (`call_agy_handoff`) | o teste e o juiz; gate mecanico antes de ler o diff |
+| Gerar imagem | agy (`generate_image`, Gemini 3.8 Flash High) | medido em 18/11/2026: 1024x1024 em 228 s; use `--timeout 420`. Reserva: Codex |
+| Ver video | quadros do `ffmpeg` em resolucao cheia lidos com o Read + audio pela skill `transcrever-video` | o agy lia o video em resolucao reduzida e errava numero de tela |
+| Segunda opiniao, council, verificacao cruzada, lote de leitura, extracao, busca na web, edicao sob teste | **nao o agy**: Codex e vibe (regra no `CLAUDE.md`; busca pela ferramenta `pesquisar_web`) | sem os Gemini 4, o agy ficou lento e fraco para texto |
 | Busca curta no repo, edicao que precisa desta sessao (MCP, Blender, Bambu) | subagente proprio | contexto e ferramentas locais |
 | Concluir, dar veredito, escrever os testes | Claude | o agy **coleta bem e conclui mal** (ver `references/delegacao.md`) |
-| Dado sigiloso (processo, investigacao, dado pessoal, extrato, credencial) | **nunca o agy** | servico externo; ele le o disco sozinho e `--sandbox` nao confina. Anonimize ou use subagente proprio |
+| Dado de caso | liberado pelo usuario (17/11/2026, treinamento desativado); credencial e senha **nunca** | servico externo; ele le o disco sozinho e `--sandbox` nao confina |
 | Video ou audio GERADO | ninguem via agy | nao existe ferramenta; ele monta com ffmpeg e descreve como se fosse gerativo |
 
 A saida do agy e **candidato, nao fato**: reconfira cada `arquivo:linha` e decida pelo efeito
@@ -78,32 +76,24 @@ Existem no agy e o modulo ainda nao expoe: `--project`/`--new-project`, `--log-f
 
 ## Catalogo de modelos
 
-**Catalogo verificado em 2026-11-17** (16 IDs: entraram Gemini 4 Hydrogen, Carbon e Argon; sairam Gemini 3.1 Pro e os Flash 3.7/3.6 em 11/2026). Estas regras valem para toda a skill:
+**Catalogo verificado em 2026-11-18** (6 IDs). Em 18/11/2026 a assinatura do Gemini foi cancelada: **os Gemini 4 (Hydrogen, Carbon, Argon) sairam** (`INVALID_MODEL` em 4 s). Estas regras valem para toda a skill:
 
-- **Modelo padrao.** Sem `model`, o modulo usa `DEFAULT_MODEL = Gemini 4 Hydrogen (High)` (avaliacao de 17/11/2026: nota igual ou melhor que o Flash 3.8 High em 1/6 do tempo). Ele
+- **Modelo padrao.** Sem `model`, o modulo usa `DEFAULT_MODEL = Gemini 3.8 Flash (High)`. Ele
   nunca omite `--model`: o agy cru usaria o default do `settings.json` do usuario, que em
   2026-09-30 era **Claude Opus 4.6 (Thinking)** — o balde de cota menor. Script que chama `agy -p`
   direto, fora do modulo, precisa passar `--model` explicito pelo mesmo motivo.
-- **Tier (High) para qualquer resposta que alguem vai ler** (fan-out, council, pipeline, handoff).
-  `(Low)`/`(Medium)` so para probe e triagem.
 - **Nunca `GPT-OSS 120B`** — desatualizado; listado so por completude.
 - **Nunca `effort` com modelo que ja tem tier no nome**: o agy responde `INVALID_MODEL`. Escolha o
   tier trocando o ID.
-- **Council**: familias diferentes (`Gemini 3.8 Flash (High)`, `Claude Sonnet 4.6 (Thinking)`,
-  `Claude Opus 4.6 (Thinking)`); o Gemini 3.1 Pro saiu do catalogo em 2026-11.
-  Chairman: `SYNTH_MODEL = Claude Opus 4.6 (Thinking)`.
+- Os Claude 4.6 do agy **vao sair**; nao dependa deles.
 
-| ID literal (`--model "..."`) | Uso |
+| ID literal (`--model "..."`) | Uso (medido em 18/11/2026) |
 |---|---|
-| `Gemini 4 Hydrogen (High)` | **DEFAULT_MODEL** e `IMAGE_MODEL`; busca na web, leitura, extracao, implementar sob teste (21/21 rodadas de busca perfeitas). Video e audio: sem ferramenta nativa (testado 17/11/2026: responde NO_VIDEO_TOOL / NO_AUDIO_TOOL) |
-| `Gemini 4 Carbon (High)` | **evitar**: nota 1,00 nas baterias, mas 3 a 4x mais lento e estourou 300 s tres vezes seguidas num conselho real (17/11/2026) |
-| `Gemini 4 Argon (High)` | **nao usar**: errou versoes em buscas na web (nota 0,91/0,93) |
-| `Gemini 4 Hydrogen/Carbon/Argon` Low, Medium, XHigh | nao testados |
-| `Gemini 3.8 Flash (High)` | padrao antigo; tambem gera imagem |
-| `Gemini 3.8 Flash (Medium)` | triagem |
-| `Gemini 3.8 Flash (Low)` | probes (**PROBE_MODEL**) |
-| `Claude Sonnet 4.6 (Thinking)` | raciocinio, review (balde Claude) |
-| `Claude Opus 4.6 (Thinking)` | chairman (**SYNTH_MODEL**, balde Claude) |
+| `Gemini 3.8 Flash (High)` | **DEFAULT_MODEL** e `IMAGE_MODEL`. Imagem: 1024x1024 em 228 s. Texto simples ("OK"): estourou 120 s |
+| `Gemini 3.8 Flash (Medium)` | triagem (nao medido hoje) |
+| `Gemini 3.8 Flash (Low)` | probes (**PROBE_MODEL**): "OK" em 52 s |
+| `Claude Sonnet 4.6 (Thinking)` | "OK" em 7 s; sai em dias |
+| `Claude Opus 4.6 (Thinking)` | **SYNTH_MODEL**; sai em dias |
 | `GPT-OSS 120B (Medium)` | nao usar |
 
 Modelo invalido erra alto: `rc=1`, `status: INVALID_MODEL` e a lista dos IDs validos, em ~4 s e

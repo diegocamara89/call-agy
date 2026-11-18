@@ -23,7 +23,7 @@ import os, sys
 sys.path.insert(0, os.path.expanduser("~/.claude/skills/call-agy/scripts"))
 from agy import call_agy, call_agy_parallel, generate_image
 
-print(call_agy("Quanto e 17*23? So o numero.", model="Gemini 3.8 Flash (Low)"))   # sem model: Gemini 4 Hydrogen (High)
+print(call_agy("Quanto e 17*23? So o numero.", model="Gemini 3.8 Flash (Low)"))   # sem model: Gemini 3.8 Flash (High)
 r = generate_image("A red ceramic mug on a wooden desk, soft daylight.", "caneca.png")
 ```
 
@@ -32,12 +32,12 @@ python scripts/agy.py single -p "Oi" --model "Gemini 3.8 Flash (Low)"
 python scripts/agy.py image -p "A red ceramic mug" --dest caneca.png
 ```
 
-## Modelos (catalogo verificado em 17/11/2026)
+## Modelos (catalogo verificado em 18/11/2026)
 
-Padrao (`DEFAULT_MODEL`) e imagem (`IMAGE_MODEL`): **Gemini 4 Hydrogen (High)**. Medido numa avaliacao de 28 tarefas
-com gabarito (21 de 21 buscas na web corretas em 3 rodadas, pior tempo 131 s), contra o Flash 3.8 High: nota igual ou
-melhor em cerca de 1/6 do tempo. Evite o **Carbon (High)** (mesma nota, mas 3 a 4 vezes mais lento: pensou 36 mil
-tokens e levou 526 s numa pergunta de decisao) e o **Argon (High)** (errou versoes de software em buscas na web).
+Sem assinatura do Gemini (cancelada em 18/11/2026) o agy ficou com 6 modelos: Gemini 3.8 Flash (High, Medium, Low), Claude
+Sonnet 4.6 e Opus 4.6 (saem em breve) e GPT-OSS. Padrao (`DEFAULT_MODEL`) e imagem (`IMAGE_MODEL`): **Gemini 3.8 Flash (High)**,
+que gera imagem de 1024x1024 em cerca de 228 s no plano gratuito. Os Gemini 4 (Hydrogen, Carbon, Argon), que valiam para
+busca e texto, sairam do catalogo. Use o agy para **imagem**; texto, busca e lote vao para outros executores.
 Nao ha ferramenta nativa de video nem de audio. A tabela completa esta no [SKILL.md](SKILL.md).
 
 A documentacao completa (regras de modelo, cota, flags, erros comuns) esta no

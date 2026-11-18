@@ -67,16 +67,6 @@ from typing import Any, Callable
 #
 # Fonte da verdade = known_models(refresh=True). Ver "Manutencao do catalogo" no SKILL.md.
 KNOWN_MODELS: tuple[str, ...] = (
-    "Gemini 4 Hydrogen (High)",
-    "Gemini 4 Hydrogen (XHigh)",
-    "Gemini 4 Hydrogen (Medium)",
-    "Gemini 4 Hydrogen (Low)",
-    "Gemini 4 Carbon (High)",
-    "Gemini 4 Carbon (Medium)",
-    "Gemini 4 Carbon (Low)",
-    "Gemini 4 Argon (High)",
-    "Gemini 4 Argon (Medium)",
-    "Gemini 4 Argon (Low)",
     "Gemini 3.8 Flash (High)",
     "Gemini 3.8 Flash (Medium)",
     "Gemini 3.8 Flash (Low)",
@@ -87,15 +77,14 @@ KNOWN_MODELS: tuple[str, ...] = (
 
 # Data (ISO) da ultima verificacao do catalogo, e a janela de revalidacao.
 # Sem historico: sobrescreva a data a cada checagem, mude ou nao a lista.
-CATALOG_CHECKED = "2026-11-17"
+CATALOG_CHECKED = "2026-11-18"
 CATALOG_RECHECK_DAYS = 15
 
 # Modelo usado quando quem chama NAO passa `model`. O agy cru usaria o default do settings.json
-# (~/.gemini/antigravity-cli/settings.json), que e do usuario e pode ser um Claude (em 2026-09-30
-# era "Claude Opus 4.6 (Thinking)") — o balde de cota menor, que esgota. Por isso o modulo nunca
-# omite --model: sem `model`, vai este Hydrogen (High), do balde Gemini. Trocado do Flash 3.8 High em
-# 2026-11-17: avaliacao-vibe, 28 tarefas, nota 1,00/0,98 contra 1,00/0,97, em 1/6 do tempo (576 s x 3541 s).
-DEFAULT_MODEL = "Gemini 4 Hydrogen (High)"
+# (~/.gemini/antigravity-cli/settings.json), que e do usuario e pode ser um Claude — o balde de cota menor.
+# Por isso o modulo nunca omite --model. Em 2026-11-18 a assinatura do Gemini foi cancelada: os Gemini 4
+# (Hydrogen, Carbon, Argon) sairam do catalogo e sobrou o Flash 3.8 (lento no plano gratuito).
+DEFAULT_MODEL = "Gemini 3.8 Flash (High)"
 # Chairman/sintese: tier de raciocinio, NAO segue o default do settings.json de proposito
 # (rebaixar a sintese para um Flash degradaria o fanout/council).
 SYNTH_MODEL = "Claude Opus 4.6 (Thinking)"
@@ -1295,7 +1284,8 @@ BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
 _BRAIN_SKIP = {".tempmediastorage", ".user_uploaded", ".system_generated", "scratch"}
 _IMG_EXT = (".png", ".jpg", ".jpeg", ".webp")
 # Quem escreve o prompt da tool generate_image; a imagem vem do gerador do proprio agy.
-IMAGE_MODEL = "Gemini 4 Hydrogen (High)"  # 2026-11-17: 1264x848 em 77 s, igual ao Flash 3.8 High (74 s)
+IMAGE_MODEL = "Gemini 3.8 Flash (High)"  # 2026-11-18: 1024x1024 em 228 s no plano gratuito (antes: 74 s)
+IMAGE_TIMEOUT = 420   # a geracao de imagem passou de 200 s no plano gratuito; 300 s ja ficava justo
 
 
 @dataclass
@@ -1387,7 +1377,7 @@ def generate_image(
     *,
     refs: list[str | Path] | tuple = (),
     model: str = IMAGE_MODEL,
-    timeout: int = THINK_TIMEOUT,
+    timeout: int = IMAGE_TIMEOUT,
     cwd: str | None = None,
     brain: Path | None = None,
 ) -> ImageResult:
@@ -1667,7 +1657,7 @@ def main(argv: list[str] | None = None) -> int:
     ip.add_argument("--dest", required=True, help="arquivo .png ou pasta")
     ip.add_argument("--ref", action="append", help="imagem de referencia (repetivel)")
     ip.add_argument("--model", default=IMAGE_MODEL)
-    ip.add_argument("--timeout", type=int, default=THINK_TIMEOUT)
+    ip.add_argument("--timeout", type=int, default=IMAGE_TIMEOUT)
     ip.set_defaults(func=_cmd_image)
 
     mp = sub.add_parser("models", help="Lista KNOWN_MODELS (--refresh consulta o agy).")
