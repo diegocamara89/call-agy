@@ -364,6 +364,36 @@ def test_exemplos_compilam() -> None:
             check(f"{doc} bloco {i} compila", ok)
 
 
+def test_escolha_do_modelo() -> None:
+    print("\n[modelo escolhido pelo ambiente e catalogo ao vivo]")
+    import subprocess as _sp
+    scripts = Path(__file__).resolve().parent.parent / "scripts"
+    env = {**os.environ, "AGY_DEFAULT_MODEL": "Modelo Teste (High)", "AGY_IMAGE_MODEL": "Imagem Teste", "AGY_IMAGE_TIMEOUT": "99"}
+    out = _sp.run([sys.executable, "-c", f"import sys; sys.path.insert(0, r'{scripts}'); import agy; "
+                   "print(agy.DEFAULT_MODEL + '|' + agy.IMAGE_MODEL + '|' + str(agy.IMAGE_TIMEOUT))"],
+                  capture_output=True, text=True, env=env).stdout.strip()
+    check("AGY_DEFAULT_MODEL, AGY_IMAGE_MODEL e AGY_IMAGE_TIMEOUT escolhem o modelo", out == "Modelo Teste (High)|Imagem Teste|99", out)
+    env2 = {k: v for k, v in os.environ.items() if not k.startswith("AGY_")}
+    out2 = _sp.run([sys.executable, "-c", f"import sys; sys.path.insert(0, r'{scripts}'); import agy; "
+                    "print(agy.IMAGE_MODEL == agy.DEFAULT_MODEL, agy.IMAGE_TIMEOUT)"], capture_output=True, text=True, env=env2).stdout.strip()
+    check("sem variavel, a imagem usa o modelo padrao e 420 s", out2 == "True 420", out2)
+
+    orig_run, orig_find, orig_known = _agy._run_agy, _agy._find_agy, _agy.known_models
+    _agy._find_agy = lambda: "agy.exe"
+    try:
+        _agy._run_agy, ch = _fake_run('{"status":"SUCCESS","response":"oi","conversation_id":"c1"}')
+        _agy.known_models = lambda refresh=False: ("Modelo Novo (High)", "Outro (Low)")
+        r = call_agy_result("p", model="Modelo Novo (High)")
+        check("modelo fora do KNOWN_MODELS mas no catalogo ao vivo e aceito", r.ok and ch and "Modelo Novo (High)" in ch[0], str(r.status))
+        try:
+            call_agy_result("p", model="Nao Existe (High)")
+            check("modelo fora do catalogo ao vivo levanta", False)
+        except AgyError as exc:
+            check("modelo fora do catalogo ao vivo levanta e lista os IDs da conta", "Modelo Novo (High)" in str(exc), str(exc))
+    finally:
+        _agy._run_agy, _agy._find_agy, _agy.known_models = orig_run, orig_find, orig_known
+
+
 def test_catalogo_sincronizado() -> None:
     print("\n[catalogo: data do agy.py = data do SKILL.md]")
     skill = (Path(__file__).resolve().parent.parent / "SKILL.md").read_text(encoding="utf-8")

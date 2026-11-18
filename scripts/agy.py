@@ -80,16 +80,22 @@ KNOWN_MODELS: tuple[str, ...] = (
 CATALOG_CHECKED = "2026-11-18"
 CATALOG_RECHECK_DAYS = 15
 
-# Modelo usado quando quem chama NAO passa `model`. O agy cru usaria o default do settings.json
-# (~/.gemini/antigravity-cli/settings.json), que e do usuario e pode ser um Claude — o balde de cota menor.
-# Por isso o modulo nunca omite --model. Em 2026-11-18 a assinatura do Gemini foi cancelada: os Gemini 4
-# (Hydrogen, Carbon, Argon) sairam do catalogo e sobrou o Flash 3.8 (lento no plano gratuito).
-DEFAULT_MODEL = "Gemini 3.8 Flash (High)"
+# Modelos usados quando quem chama NAO passa `model`. Quem escolhe e o ambiente (cada conta tem um catalogo diferente):
+#   AGY_DEFAULT_MODEL  padrao geral        AGY_SYNTH_MODEL  chairman/sintese       AGY_PROBE_MODEL  probes e triagem
+#   AGY_IMAGE_MODEL    modelo da imagem    AGY_IMAGE_TIMEOUT  segundos da imagem
+# O agy cru usaria o default do settings.json (~/.gemini/antigravity-cli/settings.json), que e do usuario e pode ser um
+# Claude (balde de cota menor); por isso o modulo nunca omite --model. Sem variavel, vale o padrao abaixo; confira o
+# catalogo da sua conta com `python agy.py models --refresh`.
+def _env(nome: str, padrao: str) -> str:
+    return (os.environ.get(nome) or "").strip() or padrao
+
+
+DEFAULT_MODEL = _env("AGY_DEFAULT_MODEL", "Gemini 3.8 Flash (High)")
 # Chairman/sintese: tier de raciocinio, NAO segue o default do settings.json de proposito
 # (rebaixar a sintese para um Flash degradaria o fanout/council).
-SYNTH_MODEL = "Claude Opus 4.6 (Thinking)"
+SYNTH_MODEL = _env("AGY_SYNTH_MODEL", "Claude Opus 4.6 (Thinking)")
 # Modelo rapido/terse para probes e triagem.
-PROBE_MODEL = "Gemini 3.8 Flash (Low)"
+PROBE_MODEL = _env("AGY_PROBE_MODEL", "Gemini 3.8 Flash (Low)")
 
 # Busca na web: sem teto o agy entra em laco de search_web (medido em 2026-11-10: 30 a 138
 # buscas em 600 s, nenhuma resposta final; com teto de 12, o mesmo prompt fechou em 159 s).
@@ -712,11 +718,13 @@ def call_agy_result(
                        "(o agy responderia INVALID_MODEL). Escolha o tier trocando o ID.")
 
     if validate_model and model is not None and model not in KNOWN_MODELS:
-        raise AgyError(
-            f"Modelo desconhecido: {model!r}. IDs validos: {', '.join(KNOWN_MODELS)}. "
-            "Rode known_models(refresh=True) se o catalogo estiver velho, ou passe "
-            "validate_model=False para deixar o proprio agy validar."
-        )
+        # KNOWN_MODELS e so um instantaneo; o catalogo muda com o plano da conta. Confere ao vivo antes de recusar.
+        vivos = known_models(refresh=True)
+        if model not in vivos:
+            raise AgyError(
+                f"Modelo desconhecido: {model!r}. IDs validos nesta conta: {', '.join(vivos)}. "
+                "Escolha um deles (ou AGY_DEFAULT_MODEL), ou passe validate_model=False para deixar o proprio agy validar."
+            )
 
     if max_searches:
         prompt = SEARCH_BUDGET_TEMPLATE.format(n=int(max_searches)) + prompt
@@ -1284,8 +1292,8 @@ BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
 _BRAIN_SKIP = {".tempmediastorage", ".user_uploaded", ".system_generated", "scratch"}
 _IMG_EXT = (".png", ".jpg", ".jpeg", ".webp")
 # Quem escreve o prompt da tool generate_image; a imagem vem do gerador do proprio agy.
-IMAGE_MODEL = "Gemini 3.8 Flash (High)"  # 2026-11-18: 1024x1024 em 228 s no plano gratuito (antes: 74 s)
-IMAGE_TIMEOUT = 420   # a geracao de imagem passou de 200 s no plano gratuito; 300 s ja ficava justo
+IMAGE_MODEL = _env("AGY_IMAGE_MODEL", DEFAULT_MODEL)   # medido em 2026-11-18: Flash 3.8 High gerou 1024x1024 em 228 s sem plano pago
+IMAGE_TIMEOUT = int(_env("AGY_IMAGE_TIMEOUT", "420"))   # sem plano pago a geracao passou de 200 s; 300 s ja ficava justo
 
 
 @dataclass

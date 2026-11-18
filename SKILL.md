@@ -1,6 +1,6 @@
 ---
 name: call-agy
-description: Use para gerar IMAGEM com o agy (Antigravity CLI do Google, Gemini 3.8 Flash) a partir de codigo, e quando o agy voltar vazio, travar, esgotar a cota ou parecer usar o modelo errado. A assinatura do Gemini foi cancelada em 18/11/2026, entao o agy so serve de ferramenta de imagem (reserva Codex); texto, busca na web, lote de leitura, segunda opiniao e council vao para o vibe e o Codex. TRIGGERS - gerar imagem, agy gera imagem, imagem com o agy, agy vazio, agy travou, cota do agy, modelos do agy.
+description: Use para delegar trabalho ao agy (Antigravity CLI do Google; os modelos dependem do plano da conta) a partir de codigo - segunda opiniao, council ou verificacao cruzada com outra familia de modelo, lote grande de leitura ou extracao que gastaria cota do Claude, gerar imagem. Tambem quando o agy voltar vazio, travar, esgotar a cota ou parecer usar o modelo errado. TRIGGERS - chamar agy, delegar ao agy, segunda opiniao, verificacao cruzada, council com agy, agy em paralelo, poupar cota do Claude, gerar imagem, agy gera imagem, agy vazio, agy travou, cota do agy, modelos do agy.
 ---
 
 # call-agy - delegar ao agy (Antigravity CLI) de forma confiavel
@@ -24,13 +24,17 @@ esgotada e outra coisa: pare e avise o usuario (ver "Cota").**
 
 | Situacao | Quem faz | Por que |
 |---|---|---|
-| Gerar imagem | agy (`generate_image`, Gemini 3.8 Flash High) | medido em 18/11/2026: 1024x1024 em 228 s; use `--timeout 420`. Reserva: Codex |
-| Ver video | quadros do `ffmpeg` em resolucao cheia lidos com o Read + audio pela skill `transcrever-video` | o agy lia o video em resolucao reduzida e errava numero de tela |
-| Segunda opiniao, council, verificacao cruzada, lote de leitura, extracao, busca na web, edicao sob teste | **nao o agy**: Codex e vibe (regra no `CLAUDE.md`; busca pela ferramenta `pesquisar_web`) | sem os Gemini 4, o agy ficou lento e fraco para texto |
+| Gerar imagem | agy (`generate_image`) | ferramenta nativa; use `--timeout 420` (sem plano pago levou 228 s) |
+| Ver video (entender fluxo, cortes) | agy | le `.mp4` em resolucao reduzida; numero pequeno de tela, leia em quadro de resolucao cheia |
+| Segunda opiniao, council, verificacao cruzada | agy | outra familia de modelo = opiniao independente |
+| Lote grande de leitura, extracao, contagem | agy | poupa a cota do Claude; peca `arquivo:linha` e confira |
+| Implementar sob testes ja escritos | agy (`call_agy_handoff`) | o teste e o juiz; gate mecanico antes de ler o diff |
 | Busca curta no repo, edicao que precisa desta sessao (MCP, Blender, Bambu) | subagente proprio | contexto e ferramentas locais |
 | Concluir, dar veredito, escrever os testes | Claude | o agy **coleta bem e conclui mal** (ver `references/delegacao.md`) |
-| Dado de caso | liberado pelo usuario (17/11/2026, treinamento desativado); credencial e senha **nunca** | servico externo; ele le o disco sozinho e `--sandbox` nao confina |
+| Dado sigiloso (processo, investigacao, dado pessoal, extrato, credencial) | **nunca o agy**, salvo decisao expressa do usuario | servico externo; ele le o disco sozinho e `--sandbox` nao confina. Anonimize ou use subagente proprio |
 | Video ou audio GERADO | ninguem via agy | nao existe ferramenta; ele monta com ffmpeg e descreve como se fosse gerativo |
+
+**Se o `CLAUDE.md` do usuario disser quais executores usar para cada tarefa, a regra dele vence esta tabela** (por exemplo, mandar so imagem ao agy e o resto a outros executores).
 
 A saida do agy e **candidato, nao fato**: reconfira cada `arquivo:linha` e decida pelo efeito
 verificado (testes, `git status`, arquivo), nunca pelo `status` da chamada.
@@ -76,25 +80,33 @@ Existem no agy e o modulo ainda nao expoe: `--project`/`--new-project`, `--log-f
 
 ## Catalogo de modelos
 
-**Catalogo verificado em 2026-11-18** (6 IDs). Em 18/11/2026 a assinatura do Gemini foi cancelada: **os Gemini 4 (Hydrogen, Carbon, Argon) sairam** (`INVALID_MODEL` em 4 s). Estas regras valem para toda a skill:
+O catalogo **depende do plano da conta e muda com o tempo**. Confira o da sua conta com `python scripts/agy.py models --refresh`.
+`KNOWN_MODELS` e so um instantaneo (verificado em 2026-11-18); um ID fora dele e conferido ao vivo no agy antes de a chamada ser recusada.
 
-- **Modelo padrao.** Sem `model`, o modulo usa `DEFAULT_MODEL = Gemini 3.8 Flash (High)`. Ele
-  nunca omite `--model`: o agy cru usaria o default do `settings.json` do usuario, que em
+- **Escolha do modelo pelo ambiente:** `AGY_DEFAULT_MODEL` (padrao quando `model` nao e passado), `AGY_IMAGE_MODEL`, `AGY_IMAGE_TIMEOUT`,
+  `AGY_SYNTH_MODEL` e `AGY_PROBE_MODEL`. Sem elas, vale o padrao do modulo (`Gemini 3.8 Flash (High)`). Passar `model=` na chamada vence tudo.
+- **Modelo padrao.** O modulo nunca omite `--model`: o agy cru usaria o default do `settings.json` do usuario, que em
   2026-09-30 era **Claude Opus 4.6 (Thinking)** — o balde de cota menor. Script que chama `agy -p`
   direto, fora do modulo, precisa passar `--model` explicito pelo mesmo motivo.
+- **Tier (High) para qualquer resposta que alguem vai ler** (fan-out, council, pipeline, handoff).
+  `(Low)`/`(Medium)` so para probe e triagem.
 - **Nunca `GPT-OSS 120B`** — desatualizado; listado so por completude.
 - **Nunca `effort` com modelo que ja tem tier no nome**: o agy responde `INVALID_MODEL`. Escolha o
   tier trocando o ID.
-- Os Claude 4.6 do agy **vao sair**; nao dependa deles.
 
-| ID literal (`--model "..."`) | Uso (medido em 18/11/2026) |
+| ID literal (`--model "..."`) | Uso |
 |---|---|
-| `Gemini 3.8 Flash (High)` | **DEFAULT_MODEL** e `IMAGE_MODEL`. Imagem: 1024x1024 em 228 s. Texto simples ("OK"): estourou 120 s |
-| `Gemini 3.8 Flash (Medium)` | triagem (nao medido hoje) |
-| `Gemini 3.8 Flash (Low)` | probes (**PROBE_MODEL**): "OK" em 52 s |
-| `Claude Sonnet 4.6 (Thinking)` | "OK" em 7 s; sai em dias |
-| `Claude Opus 4.6 (Thinking)` | **SYNTH_MODEL**; sai em dias |
+| `Gemini 3.8 Flash (High)` | padrao do modulo; imagem (1024x1024 em 228 s numa conta sem plano pago) |
+| `Gemini 3.8 Flash (Medium)` | triagem |
+| `Gemini 3.8 Flash (Low)` | probes |
+| `Claude Sonnet 4.6 (Thinking)` | raciocinio, review (balde Claude; pode sair do catalogo) |
+| `Claude Opus 4.6 (Thinking)` | chairman do council (balde Claude; pode sair do catalogo) |
 | `GPT-OSS 120B (Medium)` | nao usar |
+
+**Contas com plano pago** viram tambem modelos mais novos. Medido em 17/11/2026 numa conta com plano: `Gemini 4 Hydrogen (High)` foi o melhor
+custo-beneficio em busca e texto (21 de 21 buscas corretas, ate 131 s); `Gemini 4 Carbon (High)` tirou a mesma nota mas e 3 a 4x mais lento
+(pensou 36 mil tokens e levou 526 s numa pergunta de decisao); `Gemini 4 Argon (High)` errou versoes de software em buscas na web. Sem o plano,
+esses IDs somem do catalogo (`INVALID_MODEL`). Defina `AGY_DEFAULT_MODEL` para o que a sua conta oferece.
 
 Modelo invalido erra alto: `rc=1`, `status: INVALID_MODEL` e a lista dos IDs validos, em ~4 s e
 sem token. A validacao local (`validate_model=True`) so poupa esse round-trip num fan-out com typo.
